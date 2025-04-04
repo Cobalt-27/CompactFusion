@@ -10,3 +10,7 @@ profile/
 xfuser.egg-info/
 dist/*
 *.mp4
+scripts/
+*.egg-info/
+plots/
+*.pt
