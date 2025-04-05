@@ -1,15 +1,15 @@
 import torch
 import torch.distributed as dist
-from pipefuser.compact.utils import (
+from xfuser.compact.utils import (
     CompactConfig,
     CompactCache,
     COMPACT_COMPRESS_TYPE,
 )
-from pipefuser.prof import Profiler
-from pipefuser.modules.base_module import BaseModule
-from pipefuser.compact.stats import stats_log
+from xfuser.prof import Profiler
+# from xfuser.modules.base_module import BaseModule
+from xfuser.compact.stats import stats_log
 import os
-from pipefuser.compact.slowpath import slowpath_compress, slowpath_decompress, sim_compress
+from xfuser.compact.slowpath import slowpath_compress, slowpath_decompress, sim_compress
 """
 COMPACT: Activation Compression with Delta Transmission and Error Feedback
 
@@ -33,20 +33,29 @@ leading to accurate reconstruction while significantly reducing communication ov
 def compact_init(config: CompactConfig):
     global _config
     _config = config
-    global _cache, _stats
+    global _cache
     _cache = CompactCache()
-    _stats = None  # to be implemented later
-    global _layer_idx
-    _layer_idx = 0 # NOTE: layer idx starts from 0
+    global _step
+    _step = None
+
+def compact_hello():
     if dist.get_rank() == 0:
         print(f"🐳  Compact initialized")
+        print(f"🟦  Compact enabled" if _config.enable_compress else "🟫  Compact disabled")
+        print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
+        print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
+        print(f"🟦  Check Consistency" if _config.check_cache_consistency else "🟫  No check consistency")
 
 def compact_config():
     return _config
 
+def compact_set_step(step):
+    global _step
+    _step = step
 
-def compact_stats():
-    return _stats
+def compact_get_step():
+    global _step
+    return _step
 
 
 def compact_cache():
@@ -56,37 +65,11 @@ def compact_cache():
 def compact_reset():
     global _cache
     _cache = CompactCache()
-    from pipefuser.compact.stats import stats_clear
+    from xfuser.compact.stats import stats_clear
     stats_clear()
+    global _step
+    _step = None
 
-
-def compact_all_gather(
-    mod: BaseModule,
-    buf_list: list,
-    x: torch.Tensor,
-    group=None,
-):
-    """
-    COMPACT ENTRY
-    """
-    # if _config.log_compress_stats:
-    #     logger().log_similarity(mod, x)
-    if not _config.enable_compress:
-        """
-        Compact disabled, FALLBACK to dist.all_gather
-        """
-        with Profiler.scope("all_gather"):
-            dist.all_gather(buf_list, x, group=group, async_op=False)
-        return
-
-    compress_type = _config.compress_func(mod.idx, mod.counter)
-    _compact_all_gather(
-        mod,
-        buf_list,
-        x,
-        compress_type,
-        group,
-    )
 
 @Profiler.prof_func("compact._compress_fn")
 def _compress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE):
@@ -145,7 +128,7 @@ def compact_compress(
     else:
         if _config.fastpath:
             assert _config.compress_residual == 2 and compress_type == COMPACT_COMPRESS_TYPE.BINARY
-            from pipefuser.compact.fastpath import binary_quant_fastpath
+            from xfuser.compact.fastpath import binary_quant_fastpath
             base = _cache.get_base(cache_key)
             delta_base = _cache.get_delta_base(cache_key)
             x_t = x.transpose(0, 1)
@@ -242,7 +225,7 @@ def compact_decompress(
     else:
         if _config.fastpath:
             assert _config.compress_residual == 2 and compress_type == COMPACT_COMPRESS_TYPE.BINARY
-            from pipefuser.compact.fastpath import binary_dequant_fastpath
+            from xfuser.compact.fastpath import binary_dequant_fastpath
             numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
             channel_size = shape[-1]
             q = compressed[:numel // 16]
@@ -278,43 +261,4 @@ def compact_decompress(
                 raise ValueError("Invalid compress_residual value")
         return reconstructed.view(original_shape)
     raise RuntimeError("should not reach here")
-
-
-@Profiler.prof_func("compact._compact_all_gather")
-def _compact_all_gather(
-    mod: BaseModule,
-    outp_buf: list,
-    tensor: torch.Tensor,
-    compress_type: COMPACT_COMPRESS_TYPE,
-    group=None,
-):
-    """
-    wrapped dist.all_gather with compression
-    1. compress tensor
-    2. all_gather
-    3. decompress tensor
-    """
-    to_send = compact_compress(
-        f"{mod.idx}-{mod.distri_config.split_idx()}",
-        tensor,
-        compress_type,
-        update_cache=False,
-    )
-    buf_list = [torch.empty_like(to_send) for _ in range(len(outp_buf))]
-    with Profiler.scope("compact.all_gather"):
-        dist.all_gather(buf_list, to_send, group=group, async_op=False)
-    decompressed_list = [
-        compact_decompress(
-            f"{mod.idx}-{i}", buf, compress_type, tensor.shape, update_cache=True
-        )
-        for i, buf in enumerate(buf_list)
-    ]
-    for i in range(len(decompressed_list)):
-        # TODO: can be optimized by not copying the tensors, to be checked later
-        if i == mod.distri_config.split_idx():
-            outp_buf[i].copy_(tensor)  # accurate local tensor
-        else:
-            outp_buf[i].copy_(decompressed_list[i])
-
-
 

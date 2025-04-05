@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from pipefuser.prof import Profiler
+from xfuser.prof import Profiler
 from enum import Enum
 
 
@@ -71,7 +71,7 @@ class CompactConfig:
             assert not simulate, "Fastpath does not support simulation."
 
 
-from pipefuser.compact.compress_quantize import quantize_int8, dequantize_int8
+from xfuser.compact.compress_quantize import quantize_int8, dequantize_int8
 
 
 class CompactCache:

@@ -1,20 +1,20 @@
 import pytest
 import torch
-from pipefuser.compact.compress_topk import (
+from xfuser.compact.compress_topk import (
     sim_topk,
     topk_compress,
     topk_decompress,
     topk_sparsify,
 )
-from pipefuser.compact.compress_quantize import (
+from xfuser.compact.compress_quantize import (
     quantize_1bit,
     dequantize_1bit,
     sim_binary,
 )
-from pipefuser.compact.compress_lowrank import svd, subspace_iter
-from pipefuser.compact.compress_topk import SPARSE_LAST_DIM_SIZE
+from xfuser.compact.compress_lowrank import svd, subspace_iter
+from xfuser.compact.compress_topk import SPARSE_LAST_DIM_SIZE
 
-from pipefuser.prof import Profiler, prof_summary
+from xfuser.prof import Profiler, prof_summary
 
 # Helper function to check that two tensors are close (using relative error)
 def assert_tensor_close(tensor1, tensor2, tol=1e-3, desc=""):
@@ -97,8 +97,8 @@ def test_1_bit_quantization(
         assert_tensor_approx(decompressed_tensor, quantized_simulated)
 
 
-from pipefuser.compact.main import sim_compress, slowpath_compress, slowpath_decompress
-from pipefuser.compact.utils import COMPACT_COMPRESS_TYPE
+from xfuser.compact.main import sim_compress, slowpath_compress, slowpath_decompress
+from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
 
 @pytest.mark.parametrize(
     "n,hidden", [(1024, 2048), (512, 4096), (256, 8192)]

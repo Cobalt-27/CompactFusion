@@ -3,11 +3,11 @@ set -x
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # Select the model type
-export MODEL_TYPE="Flux"
+export MODEL_TYPE="Pixart-alpha"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
-    ["Pixart-alpha"]="pixartalpha_example.py /cfs/dit/PixArt-XL-2-1024-MS 20"
+    ["Pixart-alpha"]="pixartalpha_example.py PixArt-alpha/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 20"
     ["Sd3"]="sd3_example.py /cfs/dit/stable-diffusion-3-medium-diffusers 20"
     ["Flux"]="flux_example.py /cfs/dit/FLUX.1-dev/ 28"
@@ -23,17 +23,19 @@ else
 fi
 
 mkdir -p ./results
-
+export LOG_LEVEL=info # level: A string ('debug', 'info', 'warning', 'error', 'critical') 
+IMG_SIZE=1024
 # task args
-TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
+TASK_ARGS="--height $IMG_SIZE --width $IMG_SIZE --no_use_resolution_binning"
 
 # cache args
 # CACHE_ARGS="--use_teacache"
 # CACHE_ARGS="--use_fbcache"
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-N_GPUS=8
-PARALLEL_ARGS="--pipefusion_parallel_degree 2 --ulysses_degree 2 --ring_degree 2"
+export CUDA_VISIBLE_DEVICES=0,3
+N_GPUS=2
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree $N_GPUS" #--pipefusion_parallel_degree 1
 
 # CFG_ARGS="--use_cfg_parallel"
 
@@ -62,9 +64,10 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "brown dog laying on the ground with a metal bowl in front of him." \
+--prompt "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k" \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
 $CACHE_ARGS \
+# brown dog laying on the ground with a metal bowl in front of him.

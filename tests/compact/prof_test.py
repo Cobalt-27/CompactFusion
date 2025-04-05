@@ -1,6 +1,6 @@
 import torch
 import pytest
-from pipefuser.prof import Profiler
+from xfuser.prof import Profiler
 
 @pytest.mark.parametrize("seed", [42, 43])
 def test_profiler_with_manual_and_profiler_events(seed):

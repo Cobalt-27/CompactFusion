@@ -1,12 +1,12 @@
 import torch
 import torch.distributed as dist
-from pipefuser.compact.compress_topk import (
+from xfuser.compact.compress_topk import (
     topk_compress,
     topk_decompress,
     sim_topk,
     SPARSE_LAST_DIM_SIZE,
 )
-from pipefuser.compact.compress_quantize import (
+from xfuser.compact.compress_quantize import (
     quantize_1bit,
     dequantize_1bit,
     quantize_int2,
@@ -14,10 +14,10 @@ from pipefuser.compact.compress_quantize import (
     sim_binary,
     sim_int2,
 )
-from pipefuser.compact.compress_lowrank import (
+from xfuser.compact.compress_lowrank import (
     subspace_iter,
 )
-from pipefuser.compact.utils import (
+from xfuser.compact.utils import (
     CompactConfig,
     CompactCache,
     COMPACT_COMPRESS_TYPE,

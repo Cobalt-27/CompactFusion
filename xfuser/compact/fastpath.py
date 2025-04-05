@@ -1,9 +1,9 @@
 import triton
 import triton.language as tl
 import torch
-from pipefuser.prof import Profiler
-from pipefuser.compact.compress_quantize import dequantize_1bit
-from pipefuser.compact.compress_quantize import quantize_1bit
+from xfuser.prof import Profiler
+from xfuser.compact.compress_quantize import dequantize_1bit
+from xfuser.compact.compress_quantize import quantize_1bit
 
 @triton.jit
 def _bitwise_or(a, b):

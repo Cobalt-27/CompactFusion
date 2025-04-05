@@ -15,7 +15,7 @@ from xfuser.logger import init_logger
 
 logger = init_logger(__name__)
 
-
+ATTN_LAYER_IDX = 0 # COMPACT
 class xFuserLongContextAttention(LongContextAttention):
     ring_impl_type_supported_kv_cache = ["basic"]
 
@@ -53,7 +53,15 @@ class xFuserLongContextAttention(LongContextAttention):
             )
         
         from xfuser.core.long_ctx_attention.ring import xdit_ring_flash_attn_func
-        self.ring_attn_fn = xdit_ring_flash_attn_func
+        """
+        COMPACT ATTN
+        """
+        from xfuser.compact.main import compact_config
+        if compact_config().enable_compress:
+            self.ring_attn_fn = None
+        else:
+            self.ring_attn_fn = xdit_ring_flash_attn_func
+        self.idx = None # NOTE: assign idx in forward
 
     @torch.compiler.disable
     def forward(
@@ -160,23 +168,55 @@ class xFuserLongContextAttention(LongContextAttention):
                 self.ulysses_pg, value, self.scatter_idx, self.gather_idx
             )
 
-        out = self.ring_attn_fn(
-            query_layer,
-            key_layer,
-            value_layer,
-            dropout_p=dropout_p,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=return_attn_probs,
-            group=self.ring_pg,
-            attn_layer=attn if self.use_kv_cache else None,
-            joint_tensor_key=joint_tensor_key,
-            joint_tensor_value=joint_tensor_value,
-            joint_strategy=joint_strategy,
-        )
+        
+        """
+        APPLY COMPACT ATTN
+        """
+        if self.idx is None:
+            global ATTN_LAYER_IDX
+            self.idx = ATTN_LAYER_IDX
+            ATTN_LAYER_IDX += 1
+        from xfuser.compact.main import compact_config, compact_get_step
+        from xfuser.compact.ring import compact_ring_fwd
+        if compact_config().enable_compress:
+            # assert not self.use_kv_cache
+            out = compact_ring_fwd(
+                query_layer,
+                key_layer,
+                value_layer,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=return_attn_probs,
+                group=self.ring_pg,
+                attn_layer=attn if self.use_kv_cache else None,
+                joint_tensor_key=joint_tensor_key,
+                joint_tensor_value=joint_tensor_value,
+                joint_strategy=joint_strategy,
+                mod_idx=self.idx,
+                current_iter=compact_get_step(),
+            )
+        else:
+            out = self.ring_attn_fn(
+                query_layer,
+                key_layer,
+                value_layer,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=return_attn_probs,
+                group=self.ring_pg,
+                attn_layer=attn if self.use_kv_cache else None,
+                joint_tensor_key=joint_tensor_key,
+                joint_tensor_value=joint_tensor_value,
+                joint_strategy=joint_strategy,
+            )
 
         if type(out) == tuple:
             context_layer, _, _ = out

@@ -445,6 +445,10 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
     ):
         latents = self._init_sync_pipeline(latents)
         for i, t in enumerate(timesteps):
+            """COMPACT SET TIME STEP"""
+            from xfuser.compact.main import compact_set_step
+            compact_set_step(i)
+            
             if is_pipeline_last_stage():
                 last_timestep_latents = latents
 

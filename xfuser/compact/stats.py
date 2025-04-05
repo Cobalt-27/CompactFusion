@@ -54,7 +54,7 @@ class StatsLogger:
         elif compress_residual == 2:
             delta = real_activation - base
             delta_delta = real_activation - base - delta_base
-            # from pipefuser.compact.plot import plot_3d
+            # from xfuser.compact.plot import plot_3d
             # plot_3d(delta_delta, title=f"dd_{key}_{self.plot_counter}")
             # self.plot_counter += 1
         else:
@@ -265,7 +265,7 @@ class StatsLogger:
         
         mean_err = np.mean([np.mean([s['error'] for s in stats]) for stats in self.stats.values()])
         print(f"🟧 avg error: {mean_err:.3f}")
-        from pipefuser.compact.utils import get_emoji
+        from xfuser.compact.utils import get_emoji
         print(get_emoji())
 
 # Global stats instance

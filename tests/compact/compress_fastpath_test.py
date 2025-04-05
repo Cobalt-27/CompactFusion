@@ -1,6 +1,6 @@
 import pytest
 import torch
-from pipefuser.compact.fastpath import (
+from xfuser.compact.fastpath import (
     binary_quant_fastpath,
     sim_binary_quant_fastpath,
     binary_dequant_fastpath,

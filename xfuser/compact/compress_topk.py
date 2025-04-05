@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 import torch
-from pipefuser.prof import Profiler
+from xfuser.prof import Profiler
 
 # NOTE: This topk implementation is obsolete and not used in the current codebase.
 

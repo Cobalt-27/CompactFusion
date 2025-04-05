@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 import torch
-from pipefuser.prof import Profiler
+from xfuser.prof import Profiler
 
 def quantize_1bit(
     input_tensor: torch.Tensor,
@@ -143,7 +143,7 @@ def sim_binary(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.
     """
     # NOTE: must use mean, otherwise the dequantized tensor's norm is too large, resulting nonsensical output
     scale = torch.mean(torch.abs(input_tensor), dim=tuple(range(input_tensor.ndim - 1)), keepdim=True) if scale is None else scale
-    # from pipefuser.compact.compress_lowrank import svd, subspace_iter
+    # from xfuser.compact.compress_lowrank import svd, subspace_iter
     # # u, v = svd(torch.abs(input_tensor), 2)
     # u, v = subspace_iter(torch.abs(input_tensor), 2, 2)
     # scale = u @ v
