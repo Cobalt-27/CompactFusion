@@ -42,9 +42,10 @@ def compact_hello():
     if dist.get_rank() == 0:
         print(f"🐳  Compact initialized")
         print(f"🟦  Compact enabled" if _config.enable_compress else "🟫  Compact disabled")
-        print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
-        print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
-        print(f"🟦  Check Consistency" if _config.check_cache_consistency else "🟫  No check consistency")
+        if _config.enable_compress:
+            print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
+            print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
+            print(f"🟦  Check Consistency" if _config.check_cache_consistency else "🟫  No check consistency")
 
 def compact_config():
     return _config

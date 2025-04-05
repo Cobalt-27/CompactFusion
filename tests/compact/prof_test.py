@@ -181,3 +181,97 @@ def test_profiler_accuracy(seed):
         f"Failed: Profiler time ({profiler_time} ms) should be within 5% of manual time ({manual_time} ms)"
 
     print("Test 5 (Profiler Accuracy) passed!")
+
+@pytest.mark.parametrize("seed", [42, 43])
+def test_profiler_enable_disable(seed):
+    torch.manual_seed(seed)
+    profiler = Profiler()
+
+    x = torch.randn(1000, 1000, device='cuda')
+    y = torch.randn(1000, 1000, device='cuda')
+
+    # First operation - profiling is enabled (default)
+    profiler.start('op_enabled')
+    torch.matmul(x, y)
+    profiler.stop('op_enabled')
+
+    # Disable profiling
+    profiler.disable()
+
+    # Second operation - profiling is disabled, should not be recorded
+    profiler.start('op_disabled')
+    torch.matmul(x, y)
+    profiler.stop('op_disabled')
+
+    # Third operation with same name as first - should also not be recorded
+    profiler.start('op_enabled')
+    torch.matmul(x, y)
+    profiler.stop('op_enabled')
+
+    # Re-enable profiling
+    profiler.enable()
+
+    # Fourth operation - profiling is enabled again
+    profiler.start('op_reenabled')
+    torch.matmul(x, y)
+    profiler.stop('op_reenabled')
+
+    # Get elapsed times for the operations
+    profiler_time_enabled, _ = profiler.elapsed_time('op_enabled')
+    
+    # Check if 'op_disabled' was recorded
+    op_disabled_recorded = 'op_disabled' in profiler.events
+    
+    profiler_time_reenabled, _ = profiler.elapsed_time('op_reenabled')
+
+    # Ensure only the enabled operations were recorded
+    assert profiler_time_enabled > 0, "Failed: Enabled operation should have been recorded"
+    assert not op_disabled_recorded, "Failed: Disabled operation should not have been recorded"
+    assert profiler_time_reenabled > 0, "Failed: Re-enabled operation should have been recorded"
+
+    print("Test 6 (Profiler Enable/Disable) passed!")
+
+@pytest.mark.parametrize("seed", [42, 43])
+def test_profiler_context_with_enable_disable(seed):
+    torch.manual_seed(seed)
+    # Use the singleton instance instead of creating a new one
+    profiler = Profiler.instance()
+    
+    # Reset the profiler to start with a clean state
+    profiler.reset()
+    
+    # Make sure profiling is enabled
+    profiler.enable()
+
+    x = torch.randn(1000, 1000, device='cuda')
+    y = torch.randn(1000, 1000, device='cuda')
+
+    # Use context manager with profiling enabled
+    with Profiler.scope('op_context_enabled'):
+        torch.matmul(x, y)
+
+    # Disable profiling
+    profiler.disable()
+
+    # Use context manager with profiling disabled
+    with Profiler.scope('op_context_disabled'):
+        torch.matmul(x, y)
+
+    # Re-enable profiling
+    profiler.enable()
+
+    # Use context manager with profiling re-enabled
+    with Profiler.scope('op_context_reenabled'):
+        torch.matmul(x, y)
+
+    # Check if operations were recorded correctly
+    op_enabled_recorded = 'op_context_enabled' in profiler.events
+    op_disabled_recorded = 'op_context_disabled' in profiler.events
+    op_reenabled_recorded = 'op_context_reenabled' in profiler.events
+
+    # Ensure only the enabled operations were recorded
+    assert op_enabled_recorded, "Failed: Operation with context manager (enabled) should have been recorded"
+    assert not op_disabled_recorded, "Failed: Operation with context manager (disabled) should not have been recorded"
+    assert op_reenabled_recorded, "Failed: Operation with context manager (re-enabled) should have been recorded"
+
+    print("Test 7 (Profiler Context Manager with Enable/Disable) passed!")

@@ -5,11 +5,25 @@ import functools
 class Profiler:
     def __init__(self):
         self.events = {}
+        self.enabled = True  # Track whether profiling is enabled
+
+    def enable(self):
+        """Enable profiling - all subsequent start/stop calls will be recorded."""
+        self.enabled = True
+
+    def disable(self):
+        """Disable profiling - all subsequent start/stop calls will be ignored."""
+        self.enabled = False
 
     def start(self, name, stream=None, cpu=False):
         """
         Start recording time for a named section. Supports multiple starts.
+        No-op if profiling is disabled.
         """
+        # Skip if profiling is disabled
+        if not self.enabled:
+            return
+
         if name not in self.events:
             self.events[name] = {'start': [], 'end': [], 'elapsed': 0.0, 'cpu': cpu}
         assert len(self.events[name]['start']) == len(self.events[name]['end']), \
@@ -29,7 +43,12 @@ class Profiler:
     def stop(self, name, stream=None, cpu=False):
         """
         Stop recording time for a named section. Accumulates total time for multiple stops.
+        No-op if profiling is disabled.
         """
+        # Skip if profiling is disabled
+        if not self.enabled:
+            return
+
         assert name in self.events, f"No events recorded for '{name}'"
         assert len(self.events[name]['start']) - 1 == len(self.events[name]['end']), \
             f"Cannot stop '{name}' as there are more stops than starts"
