@@ -70,6 +70,8 @@ class CacheManager:
         custom_get_kv: Optional[Callable[[Any, Any, str], torch.Tensor]] = None,
         **kwargs,
     ):
+        from xfuser.compact.main import compact_config
+        assert not compact_config().enable_compress
         return_list = False
         if isinstance(new_kv, List):
             return_list = True

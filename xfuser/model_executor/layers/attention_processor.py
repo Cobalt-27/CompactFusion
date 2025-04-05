@@ -40,6 +40,8 @@ from xfuser.model_executor.layers import xFuserLayerWrappersRegister
 from xfuser.logger import init_logger
 from xfuser.envs import PACKAGES_CHECKER
 
+from xfuser.compact.main import compact_config
+
 if torch.__version__ >= "2.5.0":
     from xfuser.model_executor.layers.usp import USP
 else:
@@ -299,12 +301,14 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_cache_manager().update_and_get_kv_cache(
-                new_kv=[key, value],
-                layer=attn,
-                slice_dim=2,
-                layer_type="attn",
-            )
+            # Add condition to check if compact compression is enabled
+            if not compact_config().enable_compress:
+                key, value = get_cache_manager().update_and_get_kv_cache(
+                    new_kv=[key, value],
+                    layer=attn,
+                    slice_dim=2,
+                    layer_type="attn",
+                )
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
@@ -458,12 +462,14 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_cache_manager().update_and_get_kv_cache(
-                new_kv=[key, value],
-                layer=attn,
-                slice_dim=1,
-                layer_type="attn",
-            )
+            # Add condition to check if compact compression is enabled
+            if not compact_config().enable_compress:
+                key, value = get_cache_manager().update_and_get_kv_cache(
+                    new_kv=[key, value],
+                    layer=attn,
+                    slice_dim=1,
+                    layer_type="attn",
+                )
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
@@ -699,12 +705,14 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
             encoder_hidden_states_value_proj, value = value.split(
                 [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
             )
-            key, value = get_cache_manager().update_and_get_kv_cache(
-                new_kv=[key, value],
-                layer=attn,
-                slice_dim=2,
-                layer_type="attn",
-            )
+            # Add condition to check if compact compression is enabled
+            if not compact_config().enable_compress:
+                key, value = get_cache_manager().update_and_get_kv_cache(
+                    new_kv=[key, value],
+                    layer=attn,
+                    slice_dim=2,
+                    layer_type="attn",
+                )
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
         #! ---------------------------------------- KV CACHE ----------------------------------------
@@ -899,12 +907,14 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
 
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
-            key, value = get_cache_manager().update_and_get_kv_cache(
-                new_kv=[key, value],
-                layer=attn,
-                slice_dim=2,
-                layer_type="attn",
-            )
+            # Add condition to check if compact compression is enabled
+            if not compact_config().enable_compress:
+                key, value = get_cache_manager().update_and_get_kv_cache(
+                    new_kv=[key, value],
+                    layer=attn,
+                    slice_dim=2,
+                    layer_type="attn",
+                )
         #! ---------------------------------------- KV CACHE ----------------------------------------
 
         #! ---------------------------------------- ATTENTION ----------------------------------------
