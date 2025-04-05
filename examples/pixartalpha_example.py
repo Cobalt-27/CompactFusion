@@ -38,15 +38,17 @@ def main():
         enabled=True,
         compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-        comp_rank=8,
+        comp_rank=16,
         residual=2, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False,
-        log_stats=True,
+        log_stats=False,
         check_consist=False,
         fastpath=True,
     )
     compact_init(compact_config)
+    if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
+        assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     torch.distributed.barrier()
 
     pipe = xFuserPixArtAlphaPipeline.from_pretrained(
