@@ -36,19 +36,21 @@ def main():
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=16,
         residual=2, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
-        simulate=True,
+        simulate=False,
         log_stats=True,
         check_consist=False,
         fastpath=False,
         ref_activation_path='ref_activations',
         dump_activations=False,
-        calc_total_error=True,
-        delta_decay_factor=0.5
+        calc_total_error=False,
+        delta_decay_factor=0.5,
+        quantized_cache=False,
+        low_rank_dim=16
     )
     compact_init(compact_config)
     if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion

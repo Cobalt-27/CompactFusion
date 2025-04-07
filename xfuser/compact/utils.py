@@ -39,6 +39,8 @@ class CompactConfig:
         log_stats: bool = False,
         check_consist: bool = False,
         fastpath: bool = False,
+        quantized_cache: bool = False,
+        low_rank_dim: int | None = None,
         ref_activation_path: str | None = None,
         dump_activations: bool = False,
         calc_total_error: bool = False,
@@ -53,6 +55,8 @@ class CompactConfig:
             ef (bool): Enable/disable EF compression.
             simulate (bool): Enable/disable simulation compression.
             log_stats (bool): Enable/disable logging of compression stats.
+            quantized_cache (bool): Enable quantization for base tensor in CompactCache.
+            low_rank_dim (int | None): Dimension for low-rank cache compression of delta_base. None or 0 disables it.
             ref_activation_path (str | None): Path for dumping/loading reference activations.
             dump_activations (bool): If True and path is set, dump activations.
             calc_total_error (bool): If True and path is set, calculate error against reference.
@@ -70,6 +74,9 @@ class CompactConfig:
         self.log_compress_stats = log_stats
         self.check_cache_consistency = check_consist
         self.fastpath = fastpath
+        # Cache behavior flags
+        self.quantized_cache = quantized_cache
+        self.low_rank_dim = low_rank_dim
         # Updated attributes
         self.ref_activation_path = ref_activation_path
         self.dump_activations = dump_activations
@@ -89,24 +96,42 @@ class CompactConfig:
 
 
 from xfuser.compact.compress_quantize import quantize_int8, dequantize_int8
+from xfuser.compact.compress_lowrank import subspace_iter
 
 
 class CompactCache:
-    def __init__(self, quantize=False):
+    def __init__(self, quantize=False, low_rank_dim=None):
         self.quantize = quantize
+        self.low_rank_dim = low_rank_dim
         self.base = {}
         self.delta_base = {}
         self.passed_count = 0
+        self.subspace_iters = 2
 
+    @Profiler.prof_func("compact.CompactCache.put")
     def put(self, key, base, delta_base):
-        if delta_base is not None:
-            assert base.shape == delta_base.shape
+        # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-            delta_base = quantize_int8(delta_base) if delta_base is not None else None
         self.base[key] = base
-        self.delta_base[key] = delta_base
 
+        # Compress or store delta_base
+        if delta_base is not None:
+            # Apply low-rank compression only if dim is a valid integer > 0 and < shape
+            if self.low_rank_dim is not None:
+                assert self.low_rank_dim > 0 and self.low_rank_dim < min(delta_base.shape)
+                U, V, _ = subspace_iter(
+                    delta_base,
+                    rank=self.low_rank_dim,
+                    num_iters=self.subspace_iters
+                )
+                self.delta_base[key] = (U, V)
+            else: # Store original tensor directly (if dim is None, 0, or >= shape)
+                self.delta_base[key] = delta_base
+        else:
+            self.delta_base[key] = None
+
+    @Profiler.prof_func("compact.CompactCache.get_base")
     def get_base(self, key):
         base = self.base.get(key, None)
         if self.quantize:
@@ -114,12 +139,18 @@ class CompactCache:
                 base = dequantize_int8(*base)
         return base
 
+    @Profiler.prof_func("compact.CompactCache.get_delta_base") 
     def get_delta_base(self, key):
-        delta_base = self.delta_base.get(key, None)
-        if self.quantize:
-            if delta_base is not None:
-                delta_base = dequantize_int8(*delta_base)
-        return delta_base
+        # Retrieve stored item for delta_base
+        stored_item = self.delta_base.get(key, None)
+
+        if isinstance(stored_item, tuple):
+            # Assumes tuple is (U, V) from compression
+            factor_U, factor_V = stored_item
+            return factor_U @ factor_V
+        else:
+            # Handles Tensor, None, or unexpected types (returns stored_item which would be Tensor or None)
+            return stored_item
 
     def check_consistency(self, group=None):
         """
@@ -136,6 +167,7 @@ class CompactCache:
         # Assumes all ranks have the same keys
         for key in sorted(self.base.keys()):
             local_base = self.get_base(key)
+            # Reconstruct/retrieve delta_base before checking
             local_delta_base = self.get_delta_base(key)
 
             # Flatten and concatenate tensors if they exist

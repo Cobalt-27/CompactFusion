@@ -34,7 +34,11 @@ def compact_init(config: CompactConfig):
     global _config
     _config = config
     global _cache
-    _cache = CompactCache()
+    # Initialize cache using flags from the provided config
+    _cache = CompactCache(
+        quantize=config.quantized_cache, 
+        low_rank_dim=config.low_rank_dim
+    )
     global _step
     _step = None
 
@@ -67,7 +71,10 @@ def compact_cache():
 
 def compact_reset():
     global _cache
-    _cache = CompactCache()
+    _cache = CompactCache(
+        quantize=_config.quantized_cache, 
+        low_rank_dim=_config.low_rank_dim
+    )
     from xfuser.compact.stats import stats_clear
     stats_clear()
     global _step
