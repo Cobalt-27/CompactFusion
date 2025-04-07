@@ -28,8 +28,9 @@ class StatsLogger:
         recv_activation, 
         compressed_tensor, 
         compress_residual,
-        dump_activations_path: str | None = None,
-        compare_activations_path: str | None = None
+        ref_activation_path: str | None = None, 
+        dump_activations: bool = False,
+        calc_total_error: bool = False
     ):
         """
         Log compression statistics for a layer.
@@ -42,19 +43,21 @@ class StatsLogger:
             recv_activation: Reconstructed activation after compression
             compressed_tensor: The tensor after compression, need decoding for real activation
             compress_residual: Residual compression level (0, 1, or 2)
-            dump_activations_path: Path to dump activations to (if enabled)
-            compare_activations_path: Path to load ground truth activations from (if enabled)
+            ref_activation_path (str | None): Path for dumping/loading reference activations.
+            dump_activations (bool): If True and path is set, dump activations.
+            calc_total_error (bool): If True and path is set, calculate error against reference.
         """
-        # Removed: config = compact_config() # Get global config
         
         # Increment step count for this key
         step_count = self.step_counts.get(key, 0)
         self.step_counts[key] = step_count + 1
         
-        # --- Dump Activations (no try/except) ---
-        # Use passed argument directly
-        if dump_activations_path:
-            dump_dir = dump_activations_path
+        # --- Dump Activations (assert path if flag is True) ---
+        if dump_activations:
+            # Assert that the path is provided if dumping is requested
+            assert ref_activation_path is not None, \
+                "ref_activation_path must be provided when dump_activations is True"
+            dump_dir = ref_activation_path
             os.makedirs(dump_dir, exist_ok=True)
             filename = os.path.join(dump_dir, f"{key}_step{step_count}.pt")
             torch.save(before_comp_activation.detach().cpu(), filename)
@@ -66,14 +69,16 @@ class StatsLogger:
         # Calculate on-the-fly compression error
         error = torch.norm(before_comp_activation - recv_activation)
         
-        # --- Compare with Dumped Activations (no try/except) ---
+        # --- Compare with Dumped Activations (assert path if flag is True) ---
         total_error = None
-        # Use passed argument directly
-        if compare_activations_path:
-            load_dir = compare_activations_path
+        if calc_total_error:
+            # Assert that the path is provided if calculation is requested
+            assert ref_activation_path is not None, \
+                "ref_activation_path must be provided when calc_total_error is True"
+            load_dir = ref_activation_path
             filename = os.path.join(load_dir, f"{key}_step{step_count}.pt")
+            # Let it crash if file not found
             gt_activation = torch.load(filename, map_location='cpu')
-            # Ensure same device for comparison if recv_activation is on GPU
             total_error = torch.norm(recv_activation.cpu() - gt_activation)
 
         # Calculate sizes

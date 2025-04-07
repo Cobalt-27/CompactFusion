@@ -46,6 +46,8 @@ def compact_hello():
             print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
             print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
             print(f"🟦  Check Consistency" if _config.check_cache_consistency else "🟫  No check consistency")
+            print(f"🟦  Dump Activations" if _config.dump_activations else "🟫  No dump activations")
+            print(f"🟦  Calculate Total Error" if _config.calc_total_error else "🟫  No calculate total error")
 
 def compact_config():
     return _config
@@ -149,16 +151,16 @@ def compact_compress(
                     new_base.transpose(0, 1), # recv_activation (reconstructed base is logged here for fastpath)
                     compressed, 
                     _config.compress_residual,
-                    dump_activations_path=_config.dump_activations_path,
-                    compare_activations_path=_config.compare_activations_path
+                    ref_activation_path=_config.ref_activation_path,
+                    dump_activations=_config.dump_activations,
+                    calc_total_error=_config.calc_total_error
                 )
         else:
             if _config.compress_residual == 0:
                 compressed = _compress_fn(x, compress_type)
                 if _config.log_compress_stats:
-                    # Decompress locally to get reconstructed for stats
                     reconstructed_local = _decompress_fn(compressed, compress_type, x.shape)
-                    # Pass config paths to log function
+                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base=None, 
@@ -167,8 +169,9 @@ def compact_compress(
                         recv_activation=reconstructed_local, 
                         compressed_tensor=compressed, 
                         compress_residual=_config.compress_residual,
-                        dump_activations_path=_config.dump_activations_path,
-                        compare_activations_path=_config.compare_activations_path
+                        ref_activation_path=_config.ref_activation_path,
+                        dump_activations=_config.dump_activations,
+                        calc_total_error=_config.calc_total_error
                     )
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
@@ -178,7 +181,7 @@ def compact_compress(
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
                 if _config.log_compress_stats:
-                    # Pass config paths to log function
+                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base=base, 
@@ -187,8 +190,9 @@ def compact_compress(
                         recv_activation=reconstructed, 
                         compressed_tensor=compressed, 
                         compress_residual=_config.compress_residual,
-                        dump_activations_path=_config.dump_activations_path,
-                        compare_activations_path=_config.compare_activations_path
+                        ref_activation_path=_config.ref_activation_path,
+                        dump_activations=_config.dump_activations,
+                        calc_total_error=_config.calc_total_error
                     )
             elif _config.compress_residual == 2:
                 base = _cache.get_base(cache_key)
@@ -204,7 +208,7 @@ def compact_compress(
                     _decay_delta_base(new_delta_base),
                 )
                 if _config.log_compress_stats:
-                    # Pass config paths to log function
+                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base, 
@@ -213,8 +217,9 @@ def compact_compress(
                         new_base, # recv_activation 
                         compressed, 
                         _config.compress_residual,
-                        dump_activations_path=_config.dump_activations_path,
-                        compare_activations_path=_config.compare_activations_path
+                        ref_activation_path=_config.ref_activation_path,
+                        dump_activations=_config.dump_activations,
+                        calc_total_error=_config.calc_total_error
                     )
             else:
                 raise ValueError("Invalid compress_residual value")
@@ -222,7 +227,7 @@ def compact_compress(
     raise RuntimeError("should not reach here")
 
 def _decay_delta_base(delta_base):
-    return delta_base * 0.3
+    return delta_base * _config.delta_decay_factor
 
 @Profiler.prof_func("compact.compact_decompress")
 def compact_decompress(

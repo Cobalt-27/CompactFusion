@@ -45,8 +45,10 @@ def main():
         log_stats=True,
         check_consist=False,
         fastpath=False,
-        dump_activations_path=None,
-        compare_activations_path= None,#'activation_dump',
+        ref_activation_path='ref_activations',
+        dump_activations=False,
+        calc_total_error=True,
+        delta_decay_factor=0.5
     )
     compact_init(compact_config)
     if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion

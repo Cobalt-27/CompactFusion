@@ -39,8 +39,10 @@ class CompactConfig:
         log_stats: bool = False,
         check_consist: bool = False,
         fastpath: bool = False,
-        dump_activations_path: str | None = None,
-        compare_activations_path: str | None = None
+        ref_activation_path: str | None = None,
+        dump_activations: bool = False,
+        calc_total_error: bool = False,
+        delta_decay_factor: float = 0.5
     ):
         """
         Initialize compression settings.
@@ -51,6 +53,10 @@ class CompactConfig:
             ef (bool): Enable/disable EF compression.
             simulate (bool): Enable/disable simulation compression.
             log_stats (bool): Enable/disable logging of compression stats.
+            ref_activation_path (str | None): Path for dumping/loading reference activations.
+            dump_activations (bool): If True and path is set, dump activations.
+            calc_total_error (bool): If True and path is set, calculate error against reference.
+            delta_decay_factor (float): Decay factor applied to delta_base in 2nd order residual.
         """
         self.enable_compress = enabled
         self.compress_func = compress_func
@@ -64,10 +70,16 @@ class CompactConfig:
         self.log_compress_stats = log_stats
         self.check_cache_consistency = check_consist
         self.fastpath = fastpath
-        # Added attributes
-        self.dump_activations_path = dump_activations_path
-        self.compare_activations_path = compare_activations_path
+        # Updated attributes
+        self.ref_activation_path = ref_activation_path
+        self.dump_activations = dump_activations
+        self.calc_total_error = calc_total_error
+        self.delta_decay_factor = delta_decay_factor
         
+        # Add assertion to prevent simultaneous dump and calc
+        assert not (self.dump_activations and self.calc_total_error), \
+            "Cannot dump activations and calculate total error in the same run. Set one to False."
+
         if residual == 2:
             assert ef, "2nd order compression requires error feedback enabled."
         if self.fastpath:
