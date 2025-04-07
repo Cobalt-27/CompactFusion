@@ -137,22 +137,6 @@ class CompactCache:
                 assert torch.allclose(combined_tensor.float(), average_tensor, atol=1e-3), f'Inconsistent cache at key {key}, max diff: {torch.max(torch.abs(combined_tensor.float() - average_tensor)):.6f}'
         self.passed_count += 1
 
-class PowerCache:
-    """
-    Cache for supspace iteration
-    Not used for now
-    """
-    def __init__(self):
-        self.cache = {}
-
-    def put(self, key, value):
-        if key in self.cache:
-            assert value.shape == self.cache[key].shape
-        self.cache[key] = value
-    
-    def get(self, key):
-        return self.cache.get(key, None)
-
 
 def get_emoji():
     import random

@@ -21,7 +21,6 @@ from xfuser.compact.utils import (
     CompactConfig,
     CompactCache,
     COMPACT_COMPRESS_TYPE,
-    PowerCache,
 )
 def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, rank: int = None, sparse_ratio: int = None):
     """
