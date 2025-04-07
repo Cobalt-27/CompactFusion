@@ -77,6 +77,7 @@ def _compress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE):
     if _config.simulate_compress:
         # NOTE: if simulation enabled, directly return the simulated compress-then-decompress result
         return sim_compress(x, compress_type, _config.sparse_ratio, _config.comp_rank)
+
     return slowpath_compress(x, compress_type, rank=_config.comp_rank, sparse_ratio=_config.sparse_ratio)
 
             
@@ -221,7 +222,7 @@ def compact_compress(
     raise RuntimeError("should not reach here")
 
 def _decay_delta_base(delta_base):
-    return delta_base * 0.5
+    return delta_base * 0.3
 
 @Profiler.prof_func("compact.compact_decompress")
 def compact_decompress(

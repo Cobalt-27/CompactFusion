@@ -457,6 +457,10 @@ class xFuserStableDiffusion3Pipeline(xFuserPipelineBaseWrapper):
     ):
         latents, prompt_embeds = self._init_sync_pipeline(latents, prompt_embeds)
         for i, t in enumerate(timesteps):
+            """COMPACT SET TIME STEP"""
+            from xfuser.compact.main import compact_set_step
+            compact_set_step(i)
+            
             if self.interrupt:
                 continue
             if is_pipeline_last_stage():
