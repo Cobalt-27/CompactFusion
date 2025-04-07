@@ -36,15 +36,17 @@ def main():
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=16,
         residual=2, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
-        simulate=False,
-        log_stats=False,
+        simulate=True,
+        log_stats=True,
         check_consist=False,
-        fastpath=True,
+        fastpath=False,
+        dump_activations_path=None,
+        compare_activations_path= None,#'activation_dump',
     )
     compact_init(compact_config)
     if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
@@ -64,7 +66,7 @@ def main():
     pipe.vae.enable_tiling()
     
     compact_hello()
-    LOOP_COUNT = 4
+    LOOP_COUNT = 1
 
     for _ in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()

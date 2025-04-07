@@ -140,14 +140,35 @@ def compact_compress(
             scale = scale.view(-1)
             compressed = torch.cat([q, scale])
             if _config.log_compress_stats:
-                stats_log().log(cache_key, base.transpose(0, 1), delta_base.transpose(0, 1), x, new_base.transpose(0, 1), compressed, _config.compress_residual)
+                stats_log().log(
+                    cache_key, 
+                    base.transpose(0, 1), 
+                    delta_base.transpose(0, 1), 
+                    x, # before_comp_activation
+                    new_base.transpose(0, 1), # recv_activation (reconstructed base is logged here for fastpath)
+                    compressed, 
+                    _config.compress_residual,
+                    dump_activations_path=_config.dump_activations_path,
+                    compare_activations_path=_config.compare_activations_path
+                )
         else:
             if _config.compress_residual == 0:
                 compressed = _compress_fn(x, compress_type)
                 if _config.log_compress_stats:
                     # Decompress locally to get reconstructed for stats
                     reconstructed_local = _decompress_fn(compressed, compress_type, x.shape)
-                    stats_log().log(cache_key, base=None, delta_base=None, real_activation=x, recv_activation=reconstructed_local, compressed_tensor=compressed, compress_residual=_config.compress_residual)
+                    # Pass config paths to log function
+                    stats_log().log(
+                        cache_key, 
+                        base=None, 
+                        delta_base=None, 
+                        before_comp_activation=x, 
+                        recv_activation=reconstructed_local, 
+                        compressed_tensor=compressed, 
+                        compress_residual=_config.compress_residual,
+                        dump_activations_path=_config.dump_activations_path,
+                        compare_activations_path=_config.compare_activations_path
+                    )
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
                 delta = x - base
@@ -156,7 +177,18 @@ def compact_compress(
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
                 if _config.log_compress_stats:
-                    stats_log().log(cache_key, base=base, delta_base=None, real_activation=x, recv_activation=reconstructed, compressed_tensor=compressed, compress_residual=_config.compress_residual)
+                    # Pass config paths to log function
+                    stats_log().log(
+                        cache_key, 
+                        base=base, 
+                        delta_base=None, 
+                        before_comp_activation=x, 
+                        recv_activation=reconstructed, 
+                        compressed_tensor=compressed, 
+                        compress_residual=_config.compress_residual,
+                        dump_activations_path=_config.dump_activations_path,
+                        compare_activations_path=_config.compare_activations_path
+                    )
             elif _config.compress_residual == 2:
                 base = _cache.get_base(cache_key)
                 delta_base = _cache.get_delta_base(cache_key)
@@ -171,7 +203,18 @@ def compact_compress(
                     _decay_delta_base(new_delta_base),
                 )
                 if _config.log_compress_stats:
-                    stats_log().log(cache_key, base, delta_base, x, new_base, compressed, _config.compress_residual)
+                    # Pass config paths to log function
+                    stats_log().log(
+                        cache_key, 
+                        base, 
+                        delta_base, 
+                        x, # before_comp_activation
+                        new_base, # recv_activation 
+                        compressed, 
+                        _config.compress_residual,
+                        dump_activations_path=_config.dump_activations_path,
+                        compare_activations_path=_config.compare_activations_path
+                    )
             else:
                 raise ValueError("Invalid compress_residual value")
         return compressed

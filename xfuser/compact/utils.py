@@ -39,6 +39,8 @@ class CompactConfig:
         log_stats: bool = False,
         check_consist: bool = False,
         fastpath: bool = False,
+        dump_activations_path: str | None = None,
+        compare_activations_path: str | None = None
     ):
         """
         Initialize compression settings.
@@ -62,6 +64,9 @@ class CompactConfig:
         self.log_compress_stats = log_stats
         self.check_cache_consistency = check_consist
         self.fastpath = fastpath
+        # Added attributes
+        self.dump_activations_path = dump_activations_path
+        self.compare_activations_path = compare_activations_path
         
         if residual == 2:
             assert ef, "2nd order compression requires error feedback enabled."

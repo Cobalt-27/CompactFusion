@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import random
+import os # Added for path operations
 
 class StatsLogger:
     """Simple statistics logger for compression metrics."""
@@ -15,7 +16,21 @@ class StatsLogger:
         # For volume tracking
         self.total_original_volume = 0
         self.total_compressed_volume = 0
-    def log(self, key, base, delta_base, real_activation, recv_activation, compressed_tensor, compress_residual):
+        # Track steps per key for filenames
+        self.step_counts = {} 
+
+    def log(
+        self,
+        key, 
+        base, 
+        delta_base, 
+        before_comp_activation, 
+        recv_activation, 
+        compressed_tensor, 
+        compress_residual,
+        dump_activations_path: str | None = None,
+        compare_activations_path: str | None = None
+    ):
         """
         Log compression statistics for a layer.
         
@@ -23,21 +38,46 @@ class StatsLogger:
             key: String identifier for the layer
             base: Base activation used for delta calculation
             delta_base: Delta base used for delta-delta calculation (only for residual=2)
-            real_activation: Original activation without compression
+            before_comp_activation: Activation before compression step
             recv_activation: Reconstructed activation after compression
             compressed_tensor: The tensor after compression, need decoding for real activation
             compress_residual: Residual compression level (0, 1, or 2)
+            dump_activations_path: Path to dump activations to (if enabled)
+            compare_activations_path: Path to load ground truth activations from (if enabled)
         """
+        # Removed: config = compact_config() # Get global config
+        
+        # Increment step count for this key
+        step_count = self.step_counts.get(key, 0)
+        self.step_counts[key] = step_count + 1
+        
+        # --- Dump Activations (no try/except) ---
+        # Use passed argument directly
+        if dump_activations_path:
+            dump_dir = dump_activations_path
+            os.makedirs(dump_dir, exist_ok=True)
+            filename = os.path.join(dump_dir, f"{key}_step{step_count}.pt")
+            torch.save(before_comp_activation.detach().cpu(), filename)
+
         # Initialize if first time
         if key not in self.stats:
             self.stats[key] = []
         
-        # Calculate compression error
-        # use absolute norm
-        error = torch.norm(real_activation - recv_activation)
+        # Calculate on-the-fly compression error
+        error = torch.norm(before_comp_activation - recv_activation)
         
+        # --- Compare with Dumped Activations (no try/except) ---
+        total_error = None
+        # Use passed argument directly
+        if compare_activations_path:
+            load_dir = compare_activations_path
+            filename = os.path.join(load_dir, f"{key}_step{step_count}.pt")
+            gt_activation = torch.load(filename, map_location='cpu')
+            # Ensure same device for comparison if recv_activation is on GPU
+            total_error = torch.norm(recv_activation.cpu() - gt_activation)
+
         # Calculate sizes
-        original_size_bytes = real_activation.numel() * real_activation.element_size()
+        original_size_bytes = before_comp_activation.numel() * before_comp_activation.element_size()
         compressed_size_bytes = compressed_tensor.numel() * compressed_tensor.element_size()
         
         # Accumulate total volumes
@@ -49,11 +89,11 @@ class StatsLogger:
             delta = None
             delta_delta = None
         elif compress_residual == 1:
-            delta = real_activation - base
+            delta = before_comp_activation - base 
             delta_delta = None
         elif compress_residual == 2:
-            delta = real_activation - base
-            delta_delta = real_activation - base - delta_base
+            delta = before_comp_activation - base
+            delta_delta = before_comp_activation - base - delta_base
             # from xfuser.compact.plot import plot_3d
             # plot_3d(delta_delta, title=f"dd_{key}_{self.plot_counter}")
             # self.plot_counter += 1
@@ -61,7 +101,7 @@ class StatsLogger:
             raise ValueError('invalid residual')
             
         # Calculate norms
-        act_norm = torch.norm(real_activation).item()
+        act_norm = torch.norm(before_comp_activation).item()
         delta_norm = torch.norm(delta).item() if delta is not None else None
         delta_delta_norm = torch.norm(delta_delta).item() if delta_delta is not None else None
         
@@ -70,22 +110,24 @@ class StatsLogger:
         delta_sim = None
         
         if key in self.prev_activations:
+            # Ensure tensors are flat and on the same device for similarity
             act_sim = torch.nn.functional.cosine_similarity(
-                real_activation.flatten(), 
-                self.prev_activations[key].flatten(), 
+                before_comp_activation.flatten(), 
+                self.prev_activations[key].flatten().to(before_comp_activation.device), 
                 dim=0
             ).item()
             
         if delta is not None and key in self.prev_deltas:
-            delta_sim = torch.nn.functional.cosine_similarity(
+             delta_sim = torch.nn.functional.cosine_similarity(
                 delta.flatten(), 
-                self.prev_deltas[key].flatten(), 
+                self.prev_deltas[key].flatten().to(delta.device), 
                 dim=0
             ).item()
         
         # Store current stats
         self.stats[key].append({
             'error': error.item(),
+            'total_error': total_error.item() if total_error is not None else None, # Store total error
             'activation_norm': act_norm,
             'delta_norm': delta_norm,
             'delta_delta_norm': delta_delta_norm,
@@ -96,10 +138,10 @@ class StatsLogger:
             'compressed_size_bytes': compressed_size_bytes,
         })
         
-        # Store current activations and deltas for next step similarity
-        self.prev_activations[key] = real_activation.detach().clone()
+        # Store current activations and deltas for next step similarity (on CPU to save GPU memory)
+        self.prev_activations[key] = before_comp_activation.detach().cpu()
         if delta is not None:
-            self.prev_deltas[key] = delta.detach().clone()
+            self.prev_deltas[key] = delta.detach().cpu()
     
     def summary_over_steps(self, steps=None, keys=None):
         """
@@ -182,11 +224,14 @@ class StatsLogger:
                 
                 # Compute averages
                 avg_error = np.mean([s['error'] for s in stats])
+                avg_total_error_list = [s['total_error'] for s in stats if s['total_error'] is not None]
+                avg_total_error = np.mean(avg_total_error_list) if avg_total_error_list else None
                 avg_act_norm = np.mean([s['activation_norm'] for s in stats])
                 
                 # Print first line with error and activation norm
-                print(f"err: {avg_error:.3f}, act={avg_act_norm:.3f}", end="")
-                
+                print(f"err: {avg_error:.3f}" + (f", total_err: {avg_total_error:.3f}" if avg_total_error is not None else ""), end="")
+                print(f", act={avg_act_norm:.3f}", end="")
+
                 if res >= 1:
                     avg_delta_norm = np.mean([s['delta_norm'] for s in stats if s['delta_norm'] is not None])
                     delta_ratio = avg_delta_norm/avg_act_norm
@@ -264,7 +309,16 @@ class StatsLogger:
               (f", avg delta-delta: {mean_dd:.3f}" if mean_dd is not None else ""))
         
         mean_err = np.mean([np.mean([s['error'] for s in stats]) for stats in self.stats.values()])
-        print(f"🟧 avg error: {mean_err:.3f}")
+        
+        # Calculate average total error if available
+        total_err_values = []
+        for stats_list in self.stats.values():
+            for s in stats_list:
+                if s['total_error'] is not None:
+                    total_err_values.append(s['total_error'])
+        mean_total_err = np.mean(total_err_values) if total_err_values else None
+
+        print(f"🟧 avg comp error: {mean_err:.3f}" + (f", avg total err: {mean_total_err:.3f}" if mean_total_err is not None else ", [total err not logged]"))
         from xfuser.compact.utils import get_emoji
         print(get_emoji())
 
