@@ -252,7 +252,6 @@ def compact_ring_fwd(
         raise ValueError(
             f"joint_tensor_key and joint_tensor_value should be None or not None simultaneously."
         )
-        # assert attn_layer is None
     if attn_layer is not None:
         # XXX: we dont need KV Cache in ring
         # k, v = get_cache_manager().update_and_get_kv_cache(
@@ -261,8 +260,9 @@ def compact_ring_fwd(
         #     slice_dim=1,
         #     layer_type="attn",
         # )
-        k = k.contiguous()
-        v = v.contiguous()
+        # k = k.contiguous()
+        # v = v.contiguous()
+        pass
     process_group = group
     comm = RingComm(process_group)
     q = q.contiguous()
@@ -275,58 +275,48 @@ def compact_ring_fwd(
     compress_type = compact_config().compress_func(mod_idx, current_iter)
     assert compact_config().error_feedback, "error feedback must be enabled"
     
-    kv = torch.stack([k, v], dim=0).contiguous()
-
-    kv_my_cache_key = f"{mod_idx}-{comm.rank % comm.world_size}-kv"
-    kv_to_send = compact_compress(kv_my_cache_key, kv, compress_type, update_cache=True)
+    k_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-k"
+    v_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-v"
+    original_k_shape = k.shape 
+    original_v_shape = v.shape
+    k_to_send = compact_compress(k_my_cache_key, k, compress_type, update_cache=True)
+    v_to_send = compact_compress(v_my_cache_key, v, compress_type, update_cache=True)
 
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
-            buf_kv: torch.Tensor = comm.send_recv(kv_to_send)
+            buf_k: torch.Tensor = comm.send_recv(k_to_send)
+            buf_v: torch.Tensor = comm.send_recv(v_to_send)
             comm.commit()
         
         if step != 0:
             recv_rank = (comm.rank - step) % comm.world_size
-            kv_recv_cache_key = f"{mod_idx}-{recv_rank}-kv"
-            kv = compact_decompress(
-                kv_recv_cache_key, kv_to_send, prev_compress_type, kv.shape, update_cache=True
+            k_recv_cache_key = f"{mod_idx}-{recv_rank}-k"
+            v_recv_cache_key = f"{mod_idx}-{recv_rank}-v"
+            k = compact_decompress(
+                k_recv_cache_key, buf_k, prev_compress_type, original_k_shape, update_cache=True
             )
-        # else: kv is the original local kv from the first step (potentially from cache)
-
-        k_split = kv[0].contiguous()
-        v_split = kv[1].contiguous()
+            v = compact_decompress(
+                v_recv_cache_key, buf_v, prev_compress_type, original_v_shape, update_cache=True
+            )
+        k = k.contiguous() 
+        v = v.contiguous()
 
         if is_joint and joint_strategy == "rear":
             if step + 1 == comm.world_size:
-                key_to_use = torch.cat([k_split, joint_tensor_key], dim=1)
-                value_to_use = torch.cat([v_split, joint_tensor_value], dim=1)
+                key_to_use = torch.cat([k, joint_tensor_key], dim=1)
+                value_to_use = torch.cat([v, joint_tensor_value], dim=1)
             else:
-                key_to_use, value_to_use = k_split, v_split
+                key_to_use, value_to_use = k, v
         elif is_joint and joint_strategy == "front":
             if step == 0:
-                key_to_use = torch.cat([joint_tensor_key, k_split], dim=1)
-                value_to_use = torch.cat([joint_tensor_value, v_split], dim=1)
+                key_to_use = torch.cat([joint_tensor_key, k], dim=1)
+                value_to_use = torch.cat([joint_tensor_value, v], dim=1)
             else:
-                key_to_use, value_to_use = k_split, v_split
+                key_to_use, value_to_use = k, v
         else:
-            key_to_use, value_to_use = k_split, v_split
+            key_to_use, value_to_use = k, v
 
         if not causal or step <= comm.rank:
-            # fn = select_flash_attn_impl(AttnType.FA, stage="fwd-only")
-            # block_out, block_lse = fn(
-            #     q,
-            #     key_to_use, # Use the split k
-            #     value_to_use, # Use the split v
-            #     dropout_p,
-            #     softmax_scale,
-            #     causal=causal and step == 0,
-            #     window_size=window_size,
-            #     softcap=0.0,
-            #     alibi_slopes=alibi_slopes,
-            #     return_softmax=True and dropout_p > 0,
-            # )
-            
-            
             if flash_attn is None:
                 block_out, block_lse = pytorch_attn_forward(
                     q,
@@ -337,7 +327,7 @@ def compact_ring_fwd(
                     causal=causal and step == 0,
                 )
             else:
-                if flash_attn.__version__ <= "2.6.3":
+                if flash_attn.__version__ <= "2.6.3": 
                     block_out, _, _, _, _, block_lse, _, _ = _flash_attn_forward(
                         q,
                         key_to_use,
@@ -351,7 +341,7 @@ def compact_ring_fwd(
                         return_softmax=True and dropout_p > 0,
                     )
                 else:
-                    block_out, block_lse, _, _ = _flash_attn_forward(
+                     block_out, block_lse, _, _ = _flash_attn_forward(
                         q,
                         key_to_use,
                         value_to_use,
@@ -369,7 +359,8 @@ def compact_ring_fwd(
         if step + 1 != comm.world_size:
             with Profiler.scope("compact.ring.wait"):
                 comm.wait()
-            kv_to_send = buf_kv
+            k_to_send = buf_k 
+            v_to_send = buf_v
             prev_compress_type = compress_type
 
     out = out.to(q.dtype)
