@@ -14,3 +14,9 @@ scripts/
 *.egg-info/
 plots/
 *.pt
+*.npz
+*.pb
+generated_images*/
+original_images/
+ref_images/
+*.parquet
