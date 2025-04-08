@@ -148,7 +148,6 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
         Returns:
             `torch.Tensor`: The output of the attention layer.
         """
-        print("✨xFuserAttentionWrapper forward")
         # The `Attention` class can call different attention processors / attention functions
         # here we simply pass along all tensors to the selected processor class
         # For standard processors that are defined here, `**cross_attention_kwargs` is empty
@@ -225,7 +224,6 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         *args,
         **kwargs,
     ):
-        print("✨xFuserAttnProcessor2_0 __call__")
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)

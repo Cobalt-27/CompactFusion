@@ -179,7 +179,6 @@ class xFuserLongContextAttention(LongContextAttention):
         from xfuser.compact.ring import compact_ring_fwd
         if compact_config().enable_compress:
             # assert not self.use_kv_cache
-            print("✨Applying Compact Attention")
             out = compact_ring_fwd(
                 query_layer,
                 key_layer,
@@ -200,7 +199,6 @@ class xFuserLongContextAttention(LongContextAttention):
                 current_iter=compact_get_step(),
             )
         else:
-            print("✨Using default ring attention")
             out = self.ring_attn_fn(
                 query_layer,
                 key_layer,

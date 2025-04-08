@@ -42,21 +42,21 @@ def main():
     from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
-        enabled=True,
+        enabled=False,
         compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-
         comp_rank=16,
         residual=2, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False,
-        log_stats=True,
+        log_stats=False,
         check_consist=False,
         fastpath=True,
         ref_activation_path='ref_activations',
         dump_activations=False,
         calc_total_error=False,
-        delta_decay_factor=0.3
+        low_rank_dim=None,
+        delta_decay_factor=0.5
     )
     compact_init(compact_config)
     if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
@@ -97,7 +97,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
-        Profiler.instance().reset()
+        Profiler.instance().disable()
         with Profiler.instance().scope("total"):
             output = pipe(
                 height=input_config.height,
@@ -114,10 +114,10 @@ def main():
             peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps
-        if local_rank == 0:
-            stats_verbose()
-            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            print(str.join("\n", prof_result))
+        # if local_rank == 0:
+        #     stats_verbose()
+        #     prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+        #     print(str.join("\n", prof_result))
 
     parallel_info = (
         f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"
