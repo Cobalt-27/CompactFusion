@@ -293,10 +293,10 @@ def compact_ring_fwd(
             k_recv_cache_key = f"{mod_idx}-{recv_rank}-k"
             v_recv_cache_key = f"{mod_idx}-{recv_rank}-v"
             k = compact_decompress(
-                k_recv_cache_key, buf_k, prev_compress_type, original_k_shape, update_cache=True
+                k_recv_cache_key, k_to_send, prev_compress_type, original_k_shape, update_cache=True
             )
             v = compact_decompress(
-                v_recv_cache_key, buf_v, prev_compress_type, original_v_shape, update_cache=True
+                v_recv_cache_key, v_to_send, prev_compress_type, original_v_shape, update_cache=True
             )
         k = k.contiguous() 
         v = v.contiguous()
