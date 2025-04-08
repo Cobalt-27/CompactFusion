@@ -445,6 +445,10 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
     ):
         latents, latent_image_ids, prompt_embeds, text_ids = self._init_sync_pipeline(latents, latent_image_ids, prompt_embeds, text_ids)
         for i, t in enumerate(timesteps):
+            """COMPACT SET TIME STEP"""
+            from xfuser.compact.main import compact_set_step
+            compact_set_step(i)
+            
             if self.interrupt:
                 continue
             if is_pipeline_last_stage():

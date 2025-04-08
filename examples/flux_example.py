@@ -23,15 +23,45 @@ def main():
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
-    engine_config.runtime_config.dtype = torch.bfloat16
+    DTYPE = torch.half
+    engine_config.runtime_config.dtype = DTYPE
     local_rank = get_world_group().local_rank
-    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=torch.bfloat16)
+    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=DTYPE)
 
     if args.use_fp8_t5_encoder:
         from optimum.quanto import freeze, qfloat8, quantize
         logging.info(f"rank {local_rank} quantizing text encoder 2")
         quantize(text_encoder_2, weights=qfloat8)
         freeze(text_encoder_2)
+        
+    """
+    COMPACT
+    """
+    from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
+    from xfuser.prof import Profiler, prof_summary, set_torch_profiler
+    from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
+    compact_config = CompactConfig(
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
+        sparse_ratio=8,
+
+        comp_rank=16,
+        residual=2, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=True,
+        check_consist=False,
+        fastpath=True,
+        ref_activation_path='ref_activations',
+        dump_activations=False,
+        calc_total_error=False,
+        delta_decay_factor=0.3
+    )
+    compact_init(compact_config)
+    if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
+        assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
+    torch.distributed.barrier()
 
     cache_args = {
             "use_teacache": engine_args.use_teacache,
@@ -45,9 +75,10 @@ def main():
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
         cache_args=cache_args,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=DTYPE,
         text_encoder_2=text_encoder_2,
     )
+    print(pipe)
 
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
@@ -58,22 +89,35 @@ def main():
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
     pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
+    
+    compact_hello()
+    LOOP_COUNT = 1
 
-    torch.cuda.reset_peak_memory_stats()
-    start_time = time.time()
-    output = pipe(
-        height=input_config.height,
-        width=input_config.width,
-        prompt=input_config.prompt,
-        num_inference_steps=input_config.num_inference_steps,
-        output_type=input_config.output_type,
-        max_sequence_length=256,
-        guidance_scale=0.0,
-        generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-    )
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+    for _ in range(LOOP_COUNT):
+        torch.cuda.reset_peak_memory_stats()
+        start_time = time.time()
+        compact_reset()
+        Profiler.instance().reset()
+        with Profiler.instance().scope("total"):
+            output = pipe(
+                height=input_config.height,
+                width=input_config.width,
+                prompt=input_config.prompt,
+                num_inference_steps=input_config.num_inference_steps,
+                output_type=input_config.output_type,
+                max_sequence_length=256,
+                guidance_scale=0.0,
+                generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+            )
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+
+        from xfuser.compact.stats import stats_verbose, stats_verbose_steps
+        if local_rank == 0:
+            stats_verbose()
+            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            print(str.join("\n", prof_result))
 
     parallel_info = (
         f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"

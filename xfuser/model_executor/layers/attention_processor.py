@@ -148,6 +148,7 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
         Returns:
             `torch.Tensor`: The output of the attention layer.
         """
+        print("✨xFuserAttentionWrapper forward")
         # The `Attention` class can call different attention processors / attention functions
         # here we simply pass along all tensors to the selected processor class
         # For standard processors that are defined here, `**cross_attention_kwargs` is empty
@@ -224,6 +225,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         *args,
         **kwargs,
     ):
+        print("✨xFuserAttnProcessor2_0 __call__")
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)
@@ -720,7 +722,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if (
             get_pipeline_parallel_world_size() == 1
-            and get_runtime_state().split_text_embed_in_sp
+            and get_runtime_state().split_text_embed_in_sp and False # XXX: COMPACT: enforce the usage of LongContextAttn
         ):
             hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
             hidden_states = hidden_states.transpose(1, 2).reshape(

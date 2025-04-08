@@ -27,14 +27,23 @@ def quantize_1bit(
     input_tensor = torch.transpose(input_tensor, 0, 1).contiguous()
     A, B_8 = input_tensor.shape
     assert B_8 % 8 == 0, "B_8 must be divisible by 8"
+    
     B = B_8 // 8
     output_tensor = input_tensor.new_empty((A, B), dtype=torch.uint8).contiguous()
-    grid = (A,)
+    # Define the block size for the packed dimension (must match the kernel's constexpr)
+    BLOCK_SIZE_B_PACKED = 256
+    # Calculate the grid size
+    # Grid dim 0 is for channels (A)
+    # Grid dim 1 needs to cover the packed dimension (B) in blocks of BLOCK_SIZE_B_PACKED
+    grid = (A, triton.cdiv(B, BLOCK_SIZE_B_PACKED))
     with Profiler.scope("compact.quantize_1bit_kernel"):
         _quantize_1bit_kernel[grid](
             input_ptr=input_tensor,
             output_ptr=output_tensor,
-            B=B,
+            A=A,
+            B_8=B_8,
+            # Pass the block size used in grid calculation
+            BLOCK_SIZE_B_PACKED=BLOCK_SIZE_B_PACKED, 
         )
     return output_tensor, scale
 
@@ -42,29 +51,80 @@ def quantize_1bit(
 def _quantize_1bit_kernel(
     input_ptr,
     output_ptr,
-    B: tl.constexpr
+    A,
+    B_8,
+    BLOCK_SIZE_B_PACKED: tl.constexpr = 32, # Number of uint8 elements to process per instance
 ):
     """
-    Quantize input tensor to 1-bit and pack 8 values into one int8.
+    Quantize input tensor to 1-bit and pack 8 values into one uint8.
     Uses channel-wise scale and sign-based quantization.
     
     Args:
-        input_ptr: Pointer to input tensor (FP16) [A, B]
-        output_ptr: Pointer to output tensor (INT8) - packed binary values [A, B / 8]
-        B: Number of blocks per row
+        input_ptr: Input tensor (FP16), shape (channel, n_tokens)
+        output_ptr: Output tensor (INT8), shape (channel, n_tokens // 8)
+        A: Number of channels
+        B_8: Number of tokens (must be divisible by 8)
+        BLOCK_SIZE_B_PACKED: Block size for the packed B dimension (number of uint8 outputs)
     """
-    row_id = tl.program_id(0)
-    block_indices = tl.arange(0, B)  # Shape: [B]
-    block_starts = row_id * B * 8 + block_indices * 8  # Shape: [B]
-    output_starts = row_id * B + block_indices
-    packed = tl.zeros((B,), dtype=tl.uint8)  # Shape: [B]
-    for i in range(8):
-        offsets = block_starts + i
-        x = tl.load(input_ptr + offsets)  # Shape: [B]
-        binary = (x >= 0).to(tl.uint8)  # Shape: [B]
-        packed = (packed | (binary << i)).to(tl.uint8)
+    # Get program ID for the channel dimension (A)
+    pid_a = tl.program_id(0)
+    # Get program ID for the packed token dimension (B = B_8 // 8)
+    pid_b_packed = tl.program_id(1)
+
+    # Calculate actual B (number of packed uint8 values per channel)
+    B_packed = B_8 // 8
+
+    # Calculate the starting offset for the current block in the packed dimension
+    b_packed_offset = pid_b_packed * BLOCK_SIZE_B_PACKED
+    # Create offsets for the packed output dimension within the current block
+    offs_b_packed = b_packed_offset + tl.arange(0, BLOCK_SIZE_B_PACKED)
+    # Create a mask to handle blocks that might go beyond the actual packed dimension size
+    mask_b_packed = offs_b_packed < B_packed
+
+    # Calculate the starting offset for the input tensor (corresponding to the packed block)
+    # Each packed value corresponds to 8 input values
+    b_8_offset = b_packed_offset * 8
     
-    tl.store(output_ptr + output_starts, packed)
+    # Initialize the packed uint8 result for the current block
+    packed_result = tl.zeros((BLOCK_SIZE_B_PACKED,), dtype=tl.uint8)
+
+    # Iterate through the 8 bits for packing
+    for i in range(8):
+        # Calculate offsets for the input tensor (FP16 values)
+        # We need BLOCK_SIZE_B_PACKED elements for this bit position 'i' across the block
+        offs_b_8_for_bit_i = b_8_offset + tl.arange(0, BLOCK_SIZE_B_PACKED) * 8 + i
+        
+        # Load input values corresponding to the current bit 'i' for the entire block
+        input_offsets = pid_a * B_8 + offs_b_8_for_bit_i
+        # The mask should ensure we only load valid elements within B_8 for this channel
+        # And also respect the boundary of the current *packed* block
+        load_mask = mask_b_packed # This ensures we only consider elements within the valid packed block range
+        
+        x = tl.load(
+            input_ptr + input_offsets,
+            mask=load_mask,
+            other=0.0, # Use 0.0 for values outside the valid range
+        )
+        
+        # Determine the binary value (1 if x > 0, else 0)
+        # Apply the mask again to ensure we only set bits for valid elements
+        binary_value = tl.where(x >= 0, 1, 0).to(tl.uint8) & tl.where(load_mask, 1, 0).to(tl.uint8)
+        
+        # Shift the binary value to the correct bit position 'i' and OR it with the result
+        # Ensure all operations maintain uint8 type
+        shifted_binary = (binary_value << i).to(tl.uint8)
+        packed_result = (packed_result | shifted_binary).to(tl.uint8)
+
+    # Calculate the pointer for the output tensor (packed uint8 values)
+    output_ptr_base = output_ptr + pid_a * B_packed
+    output_offsets = output_ptr_base + offs_b_packed
+    
+    # Store the packed result block
+    tl.store(
+        output_offsets,
+        packed_result,
+        mask=mask_b_packed, # Mask ensures we only write within the valid packed dimension
+    )
 
 def dequantize_1bit(
     input_tensor: torch.Tensor,
@@ -87,47 +147,88 @@ def dequantize_1bit(
     assert input_tensor.ndim == 2, "Input tensor must be 2D"
     input_tensor = input_tensor.contiguous()
     (A, B) = input_tensor.shape
-    output = torch.empty((A, B*8), dtype=torch.half, device=input_tensor.device)
-    grid = (A,)
+    B_8 = B * 8 # Calculate the unpacked dimension size
+    output = torch.empty((A, B_8), dtype=torch.half, device=input_tensor.device)
+    # Define the block size (must match the kernel's constexpr)
+    BLOCK_SIZE_B = 256
+    # Calculate the 2D grid
+    # Grid dim 0 is for channels (A)
+    # Grid dim 1 needs to cover the packed dimension (B) in blocks of BLOCK_SIZE_B
+    grid = (A, triton.cdiv(B, BLOCK_SIZE_B))
     with Profiler.scope("compact.dequantize_1bit_kernel"):
         _dequantize_1bit_kernel[grid](
             input_ptr=input_tensor,
             output_ptr=output,
             scale_ptr=scale,
+            A=A,
             B=B,
+            B_8=B_8,
+            BLOCK_SIZE_B=BLOCK_SIZE_B,
         )
     output = torch.transpose(output, 0, 1).contiguous()
-    return output 
+    return output
 
 @triton.jit
 def _dequantize_1bit_kernel(
     input_ptr,
     output_ptr,
     scale_ptr,
-    B: tl.constexpr,
+    A,  # Number of channels
+    B,  # Number of packed elements per channel (uint8)
+    B_8, # Number of unpacked elements per channel (fp16)
+    BLOCK_SIZE_B: tl.constexpr = 256, # Block size for the packed dimension
 ):
     """
-    Dequantize packed 1-bit values back to FP16.
+    Dequantize packed 1-bit values back to FP16 using a blocked approach.
     Uses channel-wise scale and sign-based dequantization.
     
     Args:
-        input_ptr: Pointer to input tensor (INT8) - packed binary values [A, B / 8]
-        output_ptr: Pointer to output tensor (FP16) [A, B]
+        input_ptr: Pointer to input tensor (UINT8) - packed binary values [A, B]
+        output_ptr: Pointer to output tensor (FP16) [A, B_8]
         scale_ptr: Pointer to channel-wise quantization scale (FP16) [A]
-        B: Size of the block to process
+        A: Number of channels.
+        B: Number of packed uint8 elements per channel.
+        B_8: Number of unpacked fp16 elements per channel (B * 8).
+        BLOCK_SIZE_B: Processing block size for the packed dimension B.
     """
-    row_id = tl.program_id(0) 
-    row_start = row_id * B  # Total elements per row: num_blocks * B
-    row_output_start = row_id * B * 8
-    block_indices = tl.arange(0, B)  # Shape: [B]
-    block_starts = row_start + block_indices  # Shape: [B]
-    output_starts = row_output_start + block_indices * 8
-    scale = tl.load(scale_ptr + row_id)  # Shape: [1]
-    packed = tl.load(input_ptr + block_starts)  # Shape: [B]
+    # Program IDs
+    pid_a = tl.program_id(0)  # Channel ID
+    pid_b = tl.program_id(1)  # Block ID in the packed dimension B
+
+    # Calculate offsets for the current block in the packed dimension
+    b_offset = pid_b * BLOCK_SIZE_B
+    offs_b = b_offset + tl.arange(0, BLOCK_SIZE_B)
+    mask_b = offs_b < B  # Mask for packed dimension elements
+
+    # Load scale for the current channel
+    scale = tl.load(scale_ptr + pid_a)
+
+    # Calculate pointer offsets for loading packed data
+    packed_ptrs = input_ptr + pid_a * B + offs_b
+    # Load packed data for the current block, masking invalid elements
+    packed_data = tl.load(packed_ptrs, mask=mask_b, other=0) # Load 0 for masked elements
+
+    # Calculate base offset for output pointer (start of the unpacked row)
+    output_row_start_ptr = output_ptr + pid_a * B_8
+
+    # Unpack 8 bits
     for i in range(8):
-        bits = (packed >> i) & 1  # Shape: [B]
-        scaled = (2 * bits - 1) * scale  # Shape: [B]
-        tl.store(output_ptr + output_starts + i, scaled)
+        # Extract the i-th bit from each packed uint8 value
+        # packed_data has shape [BLOCK_SIZE_B]
+        bits = ((packed_data >> i) & 1).to(tl.int8) # Result shape: [BLOCK_SIZE_B]
+        
+        # Dequantize: 0 -> -scale, 1 -> +scale
+        # Simple approach: if bit is 1, use +scale, otherwise use -scale
+        scaled = tl.where(bits == 1, scale, -scale)
+
+        # Calculate output pointers for the current bit position
+        # Each packed element at offs_b corresponds to 8 output elements starting at offs_b * 8
+        offs_b_8 = offs_b * 8 + i # Offset within the unpacked row for the i-th bit
+        output_ptrs = output_row_start_ptr + offs_b_8
+        
+        # Store the dequantized values, masking invalid elements
+        # The mask_b ensures we only write for valid packed elements from the input block
+        tl.store(output_ptrs, scaled, mask=mask_b)
 
 @torch.compile
 def sim_binary(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Tensor:

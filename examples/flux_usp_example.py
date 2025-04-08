@@ -49,7 +49,11 @@ def parallelize_transformer(pipe: DiffusionPipeline):
         if encoder_hidden_states.shape[-2] % get_sequence_parallel_world_size() != 0:
             get_runtime_state().split_text_embed_in_sp = False
         else:
-            get_runtime_state().split_text_embed_in_sp = True
+            # get_runtime_state().split_text_embed_in_sp = True
+            get_runtime_state().split_text_embed_in_sp = False
+            """
+            COMPACT: enforce split_text_embed_in_sp = False
+            """
         
         if isinstance(timestep, torch.Tensor) and timestep.ndim != 0 and timestep.shape[0] == hidden_states.shape[0]:
             timestep = torch.chunk(timestep, get_classifier_free_guidance_world_size(),dim=0)[get_classifier_free_guidance_rank()]
