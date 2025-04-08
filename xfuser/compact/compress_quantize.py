@@ -230,7 +230,7 @@ def _dequantize_1bit_kernel(
         # The mask_b ensures we only write for valid packed elements from the input block
         tl.store(output_ptrs, scaled, mask=mask_b)
 
-@torch.compile
+# @torch.compile
 def sim_binary(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Tensor:
     """
     Simulates channel-wise 1-bit quantization with per-channel scale.
@@ -243,11 +243,11 @@ def sim_binary(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.
         A tensor of the same size as the input, representing the dequantized result.
     """
     # NOTE: must use mean, otherwise the dequantized tensor's norm is too large, resulting nonsensical output
-    scale = torch.mean(torch.abs(input_tensor), dim=tuple(range(input_tensor.ndim - 1)), keepdim=True) if scale is None else scale
-    # from xfuser.compact.compress_lowrank import svd, subspace_iter
+    # scale = torch.mean(torch.abs(input_tensor), dim=tuple(range(input_tensor.ndim - 1)), keepdim=True) if scale is None else scale
+    from xfuser.compact.compress_lowrank import svd, subspace_iter
     # # u, v = svd(torch.abs(input_tensor), 2)
-    # u, v = subspace_iter(torch.abs(input_tensor), 2, 2)
-    # scale = u @ v
+    u, v, _ = subspace_iter(torch.abs(input_tensor), 2, 2)
+    scale = u @ v
     assert scale.dtype == torch.half, "Scale must be FP16"
     # Quantize to -1 or 1 based on the sign
     quantized_tensor = torch.sign(input_tensor)
