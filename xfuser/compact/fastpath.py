@@ -16,79 +16,107 @@ def _binary_quant_fastpath(
     x_ptr,             # Current activation (C, N)
     base_ptr,          # Cached base (C, N)
     delta_base_ptr,    # Cached delta_base (C, N)
+    scale_dd_ptr,      # Pre-calculated scale of delta_delta (C,) - INPUT
     # Output Pointers
-    packed_dd_ptr,     # Packed delta_delta (C, N//8)
-    scale_dd_ptr,      # Scale of delta_delta (C,)
+    packed_dd_ptr,     # Packed delta_delta (C, N//8) - OUTPUT
     new_base_ptr,      # Output new base (C, N) - optional write
     new_delta_base_ptr,# Output new delta_base (C, N) - optional write
     # Dimensions
     N_TOKENS: tl.constexpr, # Original N
     CHANNEL: tl.constexpr,  # Original C
     N_TOKENS_8: tl.constexpr, # N_TOKENS // 8
-    # Strides (ALL are for C, N layout, except packed)
+    # Strides (ALL are for C, N layout, except packed and scale)
     stride_xc, stride_xn,
     stride_bc, stride_bn,
     stride_dbc, stride_dbn,
-    stride_packed_c, stride_packed_n8, # Strides for packed (C, N//8)
+    # stride_scale_c, # scale_dd_ptr is (C,), stride is implicitly 1
+    stride_packed_c, stride_packed_n8, # Strides for packed output (C, N//8)
     stride_newb_c, stride_newb_n,      # Strides for new_base (C, N)
     stride_newdb_c, stride_newdb_n,    # Strides for new_delta_base (C, N)
     # Meta-parameters
+    BLOCK_SIZE_N: tl.constexpr, # Block size for N dimension
     UPDATE_CACHE: tl.constexpr,
     DELTA_DECAY: tl.constexpr, # Decay factor for delta_base
 ):
     """
-    Optimized kernel quantizing delta_delta using vectorized packing.
+    Optimized kernel quantizing delta_delta using vectorized packing with blocking.
     Calculates: delta_delta = x - base - delta_base
-    Packs into 1-bit representation using sign.
-    
-    Inputs: x, base, delta_base (all C, N)
-    Outputs: packed_dd (C, N//8), scale_dd (C,)
+    Packs into 1-bit representation using sign. Scale is pre-calculated.
+
+    Inputs: x, base, delta_base (all C, N), scale_dd (C,)
+    Outputs: packed_dd (C, N//8)
     Optional: Computes cache updates if UPDATE_CACHE=True
-    Grid: (CHANNEL,)
+    Grid: (CHANNEL, cdiv(N_TOKENS, BLOCK_SIZE_N))
     """
-    c_idx = tl.program_id(0)
-    n_offsets = tl.arange(0, N_TOKENS)
-    n8_offsets = tl.arange(0, N_TOKENS_8)
+    # Program IDs
+    pid_c = tl.program_id(0)        # Channel ID
+    pid_n_block = tl.program_id(1)  # Block ID along N dimension
 
-    # Load Full Rows [N_TOKENS]
-    x_row_base_ptr = x_ptr + c_idx * stride_xc
-    base_row_base_ptr = base_ptr + c_idx * stride_bc
-    db_row_base_ptr = delta_base_ptr + c_idx * stride_dbc
-    x_row = tl.load(x_row_base_ptr + n_offsets * stride_xn)
-    base_row = tl.load(base_row_base_ptr + n_offsets * stride_bn)
-    db_row = tl.load(db_row_base_ptr + n_offsets * stride_dbn)
+    # Calculate offsets for the current block in N dimension
+    n_block_start = pid_n_block * BLOCK_SIZE_N
+    offs_n = n_block_start + tl.arange(0, BLOCK_SIZE_N)
+    mask_n = offs_n < N_TOKENS # Mask for N dimension elements
 
-    # Calculate delta_delta and scale
-    delta_delta_row = x_row - base_row - db_row # [N_TOKENS]
-    scale_val = tl.sum(tl.abs(delta_delta_row.to(tl.float32)), axis=0) / N_TOKENS
-    scale_val_fp16 = scale_val.to(tl.float16)
-    tl.store(scale_dd_ptr + c_idx, scale_val_fp16)
+    # --- Load Inputs for the current block ---
+    # Pointers for the current channel (row)
+    x_row_ptr = x_ptr + pid_c * stride_xc
+    base_row_ptr = base_ptr + pid_c * stride_bc
+    db_row_ptr = delta_base_ptr + pid_c * stride_dbc
 
-    # Calculate Signs
-    binary = (delta_delta_row >= 0).to(tl.uint8) # [N_TOKENS]
+    # Load blocks with masking
+    x_block = tl.load(x_row_ptr + offs_n * stride_xn, mask=mask_n, other=0.0)       # [BLOCK_SIZE_N]
+    base_block = tl.load(base_row_ptr + offs_n * stride_bn, mask=mask_n, other=0.0) # [BLOCK_SIZE_N]
+    db_block = tl.load(db_row_ptr + offs_n * stride_dbn, mask=mask_n, other=0.0)   # [BLOCK_SIZE_N]
 
-    # Vectorized Packing [N_TOKENS] -> [N_TOKENS_8]
-    binary_reshaped = tl.reshape(binary, (N_TOKENS_8, 8)) # [N_TOKENS_8, 8]
-    shifts = tl.arange(0, 8).to(tl.uint8) # [8]
-    shifted = (binary_reshaped << shifts).to(tl.uint8) # [N_TOKENS_8, 8]
-    packed_dd = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8) # [N_TOKENS_8]
+    # --- Calculate delta_delta and Quantize ---
+    delta_delta_block = x_block - base_block - db_block # [BLOCK_SIZE_N]
 
-    # Store Packed Row
-    packed_output_indices = c_idx * stride_packed_c + n8_offsets * stride_packed_n8
-    tl.store(packed_dd_ptr + packed_output_indices, packed_dd)
+    # Calculate Signs, applying mask to ensure 0 for out-of-bounds
+    # (delta_delta_block >= 0) is False (0) for masked elements because they are 0.0
+    binary = (delta_delta_block >= 0).to(tl.uint8) # [BLOCK_SIZE_N]
 
-    # Update Cache (when enabled)
+    # --- Vectorized Packing [BLOCK_SIZE_N] -> [BLOCK_SIZE_N // 8] ---
+    # BLOCK_SIZE_N must be divisible by 8 for this reshape/reduction
+    # Check assertion in host code if needed, 512 % 8 == 0 is true.
+    # BLOCK_SIZE_N_8 = BLOCK_SIZE_N // 8 # Not constexpr for reshape
+    # Use constexpr division directly in reshape
+    binary_reshaped = tl.reshape(binary, (BLOCK_SIZE_N // 8, 8)) # Shape: [constexpr, 8]
+    shifts = tl.arange(0, 8).to(tl.uint8)                     # [8]
+    shifted = (binary_reshaped << shifts).to(tl.uint8)        # Shape: [constexpr, 8]
+    # Reduce along axis 1 (the 8 bits)
+    packed_dd_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8) # Shape: [constexpr]
+
+    # --- Store Packed Block ---
+    # Calculate offsets for the packed output dimension
+    n8_block_start = n_block_start // 8
+    offs_n8 = n8_block_start + tl.arange(0, BLOCK_SIZE_N // 8)
+    mask_n8 = offs_n8 < N_TOKENS_8 # Mask for packed dimension (N//8)
+
+    packed_output_base_ptr = packed_dd_ptr + pid_c * stride_packed_c
+    packed_output_ptrs = packed_output_base_ptr + offs_n8 * stride_packed_n8
+    tl.store(packed_output_ptrs, packed_dd_block, mask=mask_n8)
+
+    # --- Update Cache (when enabled) ---
     if UPDATE_CACHE:
-        sign_int8 = (2 * binary.to(tl.int8) - 1) # [N_TOKENS]
-        recv_delta_delta_row = sign_int8 * scale_val_fp16 # [N_TOKENS]
-        recon_x_row = base_row + db_row + recv_delta_delta_row 
+        # Load scale for the current channel
+        scale_val_fp16 = tl.load(scale_dd_ptr + pid_c).to(tl.float16) # Scalar
 
-        new_base_indices = c_idx * stride_newb_c + n_offsets * stride_newb_n
-        tl.store(new_base_ptr + new_base_indices, recon_x_row)
+        # Dequantize based on the `binary` block, respecting the mask
+        # Mask ensures 0 sign for out-of-bounds elements
+        sign_int8 = tl.where(mask_n, (2 * binary.to(tl.int8) - 1), 0) # [BLOCK_SIZE_N]
+        recv_delta_delta_block = sign_int8 * scale_val_fp16           # [BLOCK_SIZE_N]
 
-        new_delta_base_row = (db_row + recv_delta_delta_row) * DELTA_DECAY
-        new_delta_base_indices = c_idx * stride_newdb_c + n_offsets * stride_newdb_n
-        tl.store(new_delta_base_ptr + new_delta_base_indices, new_delta_base_row)
+        # Calculate new base and delta_base blocks
+        recon_x_block = base_block + db_block + recv_delta_delta_block         # [BLOCK_SIZE_N]
+        new_delta_base_block = (db_block + recv_delta_delta_block) * DELTA_DECAY # [BLOCK_SIZE_N]
+
+        # Pointers for output caches for the current channel
+        new_base_row_ptr = new_base_ptr + pid_c * stride_newb_c
+        new_db_row_ptr = new_delta_base_ptr + pid_c * stride_newdb_c
+
+        # Store new base and delta_base blocks with N mask
+        tl.store(new_base_row_ptr + offs_n * stride_newb_n, recon_x_block, mask=mask_n)
+        tl.store(new_db_row_ptr + offs_n * stride_newdb_n, new_delta_base_block, mask=mask_n)
 
 
 @Profiler.prof_func("compact.binary_quant_fastpath")
@@ -101,9 +129,10 @@ def binary_quant_fastpath(
 ):
     """
     Quantize delta_delta to 1-bit representation with fast path kernel.
-    
+    Uses blocking along N dimension. Scale is calculated outside kernel.
+
     Input: x, base, delta_base (C, N)
-    Output: packed_dd (C, N//8), scale_dd (C,), 
+    Output: packed_dd (C, N//8), scale_dd (C,),
             new_base and new_delta_base if update_cache=True, else None, None
     """
     assert x_tensor_cn.dtype == torch.half
@@ -112,41 +141,71 @@ def binary_quant_fastpath(
     assert x_tensor_cn.ndim == 2 and base_tensor_cn.ndim == 2 and delta_base_tensor_cn.ndim == 2
     assert x_tensor_cn.shape == base_tensor_cn.shape == delta_base_tensor_cn.shape
     assert x_tensor_cn.is_cuda and base_tensor_cn.is_cuda and delta_base_tensor_cn.is_cuda
-    
+
     x_tensor_cn = x_tensor_cn.contiguous()
     base_tensor_cn = base_tensor_cn.contiguous()
     delta_base_tensor_cn = delta_base_tensor_cn.contiguous()
 
     CHANNEL, N_TOKENS = x_tensor_cn.shape
-    assert N_TOKENS % 8 == 0, "N_TOKENS must be divisible by 8"
+    # Kernel requires BLOCK_SIZE_N to be divisible by 8 for packing reshape
+    # Also N_TOKENS should ideally be cleanly divisible by 8 if possible, but kernel handles non-divisible N_TOKENS via mask_n
+    assert N_TOKENS % 8 == 0, "N_TOKENS must be divisible by 8 for packing output alignment"
     N_TOKENS_8 = N_TOKENS // 8
+
+    # Calculate delta_delta and scale using PyTorch
+    delta_delta_cn = x_tensor_cn - base_tensor_cn - delta_base_tensor_cn
+    # Calculate scale per channel (dim=1 is N_TOKENS) -> shape (CHANNEL,)
+    scale_dd_output = torch.mean(torch.abs(delta_delta_cn), dim=1).to(torch.half)
 
     # Allocate outputs
     packed_dd_output = torch.empty((CHANNEL, N_TOKENS_8), dtype=torch.uint8, device=x_tensor_cn.device)
-    scale_dd_output = torch.empty((CHANNEL,), dtype=torch.half, device=x_tensor_cn.device)
+    # scale_dd_output is calculated above
     new_base_output_cn = torch.empty_like(x_tensor_cn) if update_cache else None
     new_delta_base_output_cn = torch.empty_like(x_tensor_cn) if update_cache else None
 
-    grid = (CHANNEL,)
+    # Define block size for N dimension - MUST BE DIVISIBLE BY 8
+    BLOCK_SIZE_N = 512
+    assert BLOCK_SIZE_N % 8 == 0, "BLOCK_SIZE_N must be divisible by 8"
+    # Calculate 2D grid
+    grid = (CHANNEL, triton.cdiv(N_TOKENS, BLOCK_SIZE_N))
+    # print(f"grid: {grid}") # Debug print
+    # print(f'N_TOKENS: {N_TOKENS}, CHANNEL: {CHANNEL}, N_TOKENS_8: {N_TOKENS_8}, BLOCK_SIZE_N: {BLOCK_SIZE_N}') # Debug print
+
+    # Prepare dummy pointers/strides if cache is not updated, kernel expects non-None
+    dummy_tensor = x_tensor_cn # Use an existing tensor for placeholder properties
+    new_base_ptr = new_base_output_cn if update_cache else dummy_tensor
+    new_delta_base_ptr = new_delta_base_output_cn if update_cache else dummy_tensor
+    stride_newb_c = new_base_ptr.stride(0) if update_cache else 0
+    stride_newb_n = new_base_ptr.stride(1) if update_cache else 0
+    stride_newdb_c = new_delta_base_ptr.stride(0) if update_cache else 0
+    stride_newdb_n = new_delta_base_ptr.stride(1) if update_cache else 0
+
 
     with Profiler.scope("compact._binary_quant_fastpath"):
          _binary_quant_fastpath[grid](
-             x_tensor_cn, base_tensor_cn, delta_base_tensor_cn,
-             packed_dd_output, scale_dd_output,
-             new_base_output_cn if update_cache else x_tensor_cn,
-             new_delta_base_output_cn if update_cache else x_tensor_cn,
-            N_TOKENS, CHANNEL, N_TOKENS_8,
+             x_tensor_cn, base_tensor_cn, delta_base_tensor_cn, # Inputs (C, N)
+             scale_dd_output,              # Input scale (C,)
+             packed_dd_output,             # Output packed (C, N//8)
+             new_base_ptr,                 # Output new_base (C, N) or dummy
+             new_delta_base_ptr,           # Output new_delta_base (C, N) or dummy
+             # --- Dimensions ---
+             N_TOKENS, CHANNEL, N_TOKENS_8,
+             # --- Strides ---
+             # Inputs
              x_tensor_cn.stride(0), x_tensor_cn.stride(1),
              base_tensor_cn.stride(0), base_tensor_cn.stride(1),
              delta_base_tensor_cn.stride(0), delta_base_tensor_cn.stride(1),
+             # Output Packed
              packed_dd_output.stride(0), packed_dd_output.stride(1),
-             new_base_output_cn.stride(0) if update_cache else 0,
-             new_base_output_cn.stride(1) if update_cache else 0,
-             new_delta_base_output_cn.stride(0) if update_cache else 0,
-             new_delta_base_output_cn.stride(1) if update_cache else 0,
-            UPDATE_CACHE=update_cache,
+             # Input Scale is contiguous (C,), stride is implicitly 1
+             # Output Caches (or dummy)
+             stride_newb_c, stride_newb_n,
+             stride_newdb_c, stride_newdb_n,
+             # --- Meta-parameters ---
+             BLOCK_SIZE_N=BLOCK_SIZE_N, # Pass block size
+             UPDATE_CACHE=update_cache,
              DELTA_DECAY=float(delta_decay_factor),
-        )
+         )
 
     if update_cache:
         return packed_dd_output, scale_dd_output, new_base_output_cn, new_delta_base_output_cn
@@ -216,50 +275,86 @@ def _binary_dequant_fastpath(
     stride_recon_c, stride_recon_n,
     stride_newdb_c, stride_newdb_n,
     # Meta-parameters
+    BLOCK_SIZE_N: tl.constexpr, # Block size for N dimension
     DELTA_DECAY: tl.constexpr, # Decay factor for delta_base
 ):
     """
-    Optimized dequantization kernel with loop-free unpacking.
+    Optimized dequantization kernel with blocking along N.
     Calculates:
       - recv_delta_delta = dequantize(packed_dd, scale_dd)
       - reconstructed = base + delta_base + recv_delta_delta
       - new_delta_base = (delta_base + recv_delta_delta) * DELTA_DECAY
-    
-    Inputs: packed_dd (C, N//8), scale_dd (C,), base/delta_base (C, N) 
+
+    Inputs: packed_dd (C, N//8), scale_dd (C,), base/delta_base (C, N)
     Outputs: reconstructed (C, N), new_delta_base (C, N)
-    Grid: (CHANNEL,)
+    Grid: (CHANNEL, cdiv(N_TOKENS, BLOCK_SIZE_N))
     """
-    c_idx = tl.program_id(0)
-    n_offsets = tl.arange(0, N_TOKENS)
+    # Program IDs
+    pid_c = tl.program_id(0)        # Channel ID
+    pid_n_block = tl.program_id(1)  # Block ID along N dimension
 
+    # Calculate offsets for the current block in N dimension
+    n_block_start = pid_n_block * BLOCK_SIZE_N
+    offs_n = n_block_start + tl.arange(0, BLOCK_SIZE_N)
+    mask_n = offs_n < N_TOKENS # Mask for N dimension elements
+
+    # --- Dequantize Block ---
     # Load Scale [1]
-    scale = tl.load(scale_dd_ptr + c_idx).to(tl.float16)
+    scale = tl.load(scale_dd_ptr + pid_c).to(tl.float16)
 
-    # Dequantize to Full recv_delta_delta_row [N_TOKENS] 
-    byte_indices = n_offsets // 8
-    bit_indices = n_offsets % 8
-    packed_row_base_ptr = packed_dd_ptr + c_idx * stride_packed_c
-    packed_byte_ptrs = packed_row_base_ptr + byte_indices * stride_packed_n8
-    packed_bytes_for_elems = tl.load(packed_byte_ptrs) # [N_TOKENS]
-    bits = (packed_bytes_for_elems >> bit_indices) & 1 # [N_TOKENS]
-    signs = (2 * bits - 1).to(tl.int8) # [N_TOKENS]
-    recv_delta_delta_row = signs * scale # [N_TOKENS]
+    # Calculate offsets and mask for the packed input dimension (N//8)
+    # corresponding to the current block in N
+    # BLOCK_SIZE_N_8 = BLOCK_SIZE_N // 8 # Not constexpr for arange
+    n8_block_start = n_block_start // 8
+    offs_n8 = n8_block_start + tl.arange(0, BLOCK_SIZE_N // 8)
+    mask_n8 = offs_n8 < N_TOKENS_8
 
-    # Load Base and Delta Base [N_TOKENS]
-    base_row_ptr = base_ptr + c_idx * stride_base_c + n_offsets * stride_base_n
-    db_row_ptr = delta_base_ptr + c_idx * stride_db_c + n_offsets * stride_db_n
-    base_row = tl.load(base_row_ptr)
-    db_row = tl.load(db_row_ptr)
+    # Load packed data block [BLOCK_SIZE_N // 8]
+    packed_row_ptr = packed_dd_ptr + pid_c * stride_packed_c
+    packed_block = tl.load(packed_row_ptr + offs_n8 * stride_packed_n8, mask=mask_n8, other=0)
 
-    # Calculate Outputs [N_TOKENS]
-    recon_row = base_row + db_row + recv_delta_delta_row
-    new_db_row = (db_row + recv_delta_delta_row) * DELTA_DECAY
+    # Unpack bits: This is the tricky part with blocking.
+    # We need to get [BLOCK_SIZE_N] bits from [BLOCK_SIZE_N_8] bytes.
+    # Map each offset in offs_n to its corresponding byte and bit position.
+    byte_indices_in_row = offs_n // 8
+    bit_indices_in_byte = offs_n % 8
 
-    # Store Outputs [N_TOKENS]
-    recon_out_ptr = recon_ptr + c_idx * stride_recon_c + n_offsets * stride_recon_n
-    new_db_out_ptr = new_db_ptr + c_idx * stride_newdb_c + n_offsets * stride_newdb_n
-    tl.store(recon_out_ptr, recon_row)
-    tl.store(new_db_out_ptr, new_db_row)
+    # We need to load the relevant bytes for all elements in the offs_n block.
+    # Since offs_n can span multiple packed blocks, we load directly using byte_indices_in_row.
+    # Need to handle potential out-of-bounds access for byte_indices_in_row if offs_n goes beyond N_TOKENS
+    mask_bytes = byte_indices_in_row < N_TOKENS_8
+    # Combine with original mask_n to ensure we only care about valid element positions
+    final_byte_mask = mask_n & mask_bytes
+
+    # Load the bytes corresponding to each element in the current N block
+    packed_bytes_for_elems = tl.load(
+        packed_row_ptr + byte_indices_in_row * stride_packed_n8,
+        mask=final_byte_mask,
+        other=0 # Load 0 for out-of-bounds bytes
+    ) # Shape: [BLOCK_SIZE_N]
+
+    # Extract the correct bit for each element
+    bits = ((packed_bytes_for_elems >> bit_indices_in_byte) & 1) # Shape: [BLOCK_SIZE_N]
+
+    # Dequantize using the extracted bits, applying the original mask_n
+    signs = tl.where(mask_n, (2 * bits - 1).to(tl.int8), 0) # Shape: [BLOCK_SIZE_N]
+    recv_delta_delta_block = signs * scale                 # Shape: [BLOCK_SIZE_N]
+
+    # --- Load Base and Delta Base Block ---
+    base_row_ptr = base_ptr + pid_c * stride_base_c
+    db_row_ptr = delta_base_ptr + pid_c * stride_db_c
+    base_block = tl.load(base_row_ptr + offs_n * stride_base_n, mask=mask_n, other=0.0) # [BLOCK_SIZE_N]
+    db_block = tl.load(db_row_ptr + offs_n * stride_db_n, mask=mask_n, other=0.0)     # [BLOCK_SIZE_N]
+
+    # --- Calculate Outputs Block ---
+    recon_block = base_block + db_block + recv_delta_delta_block # [BLOCK_SIZE_N]
+    new_db_block = (db_block + recv_delta_delta_block) * DELTA_DECAY # [BLOCK_SIZE_N]
+
+    # --- Store Outputs Block ---
+    recon_out_ptr = recon_ptr + pid_c * stride_recon_c
+    new_db_out_ptr = new_db_ptr + pid_c * stride_newdb_c
+    tl.store(recon_out_ptr + offs_n * stride_recon_n, recon_block, mask=mask_n)
+    tl.store(new_db_out_ptr + offs_n * stride_newdb_n, new_db_block, mask=mask_n)
 
 
 @Profiler.prof_func("compact.binary_dequant_fastpath")
@@ -271,7 +366,8 @@ def binary_dequant_fastpath(
     delta_decay_factor: float,  # Decay factor for delta_base
 ):
     """
-    Dequantize 1-bit values and calculate reconstructed output and new_delta_base using Triton kernel.
+    Dequantize 1-bit values and calculate reconstructed output and new_delta_base 
+    using a Triton kernel with blocking along the N dimension.
     
     Input: packed_dd (C, N//8), scale_dd (C,), base/delta_base (C, N)
     Output: reconstructed (C, N), new_delta_base (C, N)
@@ -298,7 +394,11 @@ def binary_dequant_fastpath(
     reconstructed_output_cn = torch.empty_like(base_cn)
     new_delta_base_output_cn = torch.empty_like(delta_base_cn)
 
-    grid = (CHANNEL,)
+    # Define block size for N dimension
+    BLOCK_SIZE_N = 512
+    assert BLOCK_SIZE_N % 8 == 0, "BLOCK_SIZE_N must be divisible by 8 for unpacking logic"
+    # Calculate 2D grid
+    grid = (CHANNEL, triton.cdiv(N_TOKENS, BLOCK_SIZE_N))
 
     with Profiler.scope("compact._binary_dequant_fastpath"):
          _binary_dequant_fastpath[grid](
@@ -310,6 +410,7 @@ def binary_dequant_fastpath(
              delta_base_cn.stride(0), delta_base_cn.stride(1),
              reconstructed_output_cn.stride(0), reconstructed_output_cn.stride(1),
              new_delta_base_output_cn.stride(0), new_delta_base_output_cn.stride(1),
+             BLOCK_SIZE_N=BLOCK_SIZE_N,
              DELTA_DECAY=float(delta_decay_factor),
          )
 

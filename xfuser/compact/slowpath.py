@@ -35,7 +35,7 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
     Returns:
         A compressed tensor.
     """
-    assert x.dtype == torch.half
+    assert x.dtype == torch.half, f"x.dtype: {x.dtype}"
     assert x.dim() == 2
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
         q, scale = quantize_1bit(x)
