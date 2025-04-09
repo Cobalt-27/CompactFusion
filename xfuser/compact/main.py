@@ -143,12 +143,16 @@ def compact_compress(
             base = _cache.get_base(cache_key)
             delta_base = _cache.get_delta_base(cache_key)
             x_t = x.transpose(0, 1)
-            q, scale, new_base, new_delta_base = binary_quant_fastpath(x_t, base, delta_base, update_cache, delta_decay_factor=0.5)
+            q, scale_u, scale_v, new_base, new_delta_base = binary_quant_fastpath(
+                x_t, base, delta_base, update_cache, delta_decay_factor=_config.delta_decay_factor
+            )
             if update_cache:
                 _cache.put(cache_key, new_base, new_delta_base)
-            q = q.view(torch.half).view(-1)
-            scale = scale.view(-1)
-            compressed = torch.cat([q, scale])
+            compressed = torch.cat([
+                q.flatten().view(torch.half),
+                scale_u.flatten(),
+                scale_v.flatten()
+            ])
             if _config.log_compress_stats:
                 stats_log().log(
                     cache_key, 
@@ -167,7 +171,6 @@ def compact_compress(
                 compressed = _compress_fn(x, compress_type)
                 if _config.log_compress_stats:
                     reconstructed_local = _decompress_fn(compressed, compress_type, x.shape)
-                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base=None, 
@@ -188,7 +191,6 @@ def compact_compress(
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
                 if _config.log_compress_stats:
-                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base=base, 
@@ -285,16 +287,21 @@ def compact_decompress(
             from xfuser.compact.fastpath import binary_dequant_fastpath
             numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
             channel_size = shape[-1]
+            u_size = channel_size
+            v_size = shape[0]
+            assert compressed.numel() == numel // 16 + u_size + v_size, f"Mismatch in compressed tensor size: expected {numel // 16 + u_size + v_size}, got {compressed.numel()}"
             q = compressed[:numel // 16]
-            scale = compressed[numel // 16:numel // 16 + channel_size].contiguous()
+            scale_u = compressed[numel // 16:numel // 16 + u_size].flatten().contiguous()
+            scale_v = compressed[numel // 16 + u_size: numel // 16 + u_size + v_size].flatten().contiguous()
             q = q.view(torch.uint8).view(channel_size, -1).contiguous()
 
             reconstructed, new_delta_base = binary_dequant_fastpath(
                 q,
-                scale,
+                scale_u,
+                scale_v,
                 _cache.get_base(cache_key),
                 _cache.get_delta_base(cache_key),
-                delta_decay_factor=0.5,
+                delta_decay_factor=_config.delta_decay_factor,
             )
             if update_cache:
                 _cache.put(cache_key, reconstructed, new_delta_base)

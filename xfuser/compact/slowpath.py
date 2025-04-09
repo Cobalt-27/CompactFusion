@@ -38,13 +38,11 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
     assert x.dtype == torch.half, f"x.dtype: {x.dtype}"
     assert x.dim() == 2
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        q, scale = quantize_1bit(x)
-        assert q.size(0) == scale.size(0)
-        # NOTE: Casting all non-half tensors to half
+        q, scale_u, scale_v = quantize_1bit(x)
         assert q.dtype == torch.uint8
-        assert scale.dtype == torch.half
-        q = q.view(torch.half)
-        comp_list = [q, scale]
+        assert scale_u.dtype == torch.half
+        assert scale_v.dtype == torch.half
+        comp_list = [q.view(torch.half).contiguous(), scale_u.contiguous(), scale_v.contiguous()]
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         q, scale = quantize_int2(x)
         # NOTE: Casting all non-half tensors to half
@@ -87,12 +85,19 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
     
     assert x.dtype == torch.half
     numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
+    N, C = shape # Get N and C explicitly
 
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        # q and scale have same count, but q is 1-bit
-        split_size = [numel // 16, channel_size]
+        q_numel = numel // 8 # Correct: num UINT8 elements for q
+        u_numel = N       # Correct: num FP16 elements for scale_u
+        v_numel = C       # Correct: num FP16 elements for scale_v
+        # Split sizes are in terms of FP16 elements
+        split_size = [q_numel // 2, u_numel, v_numel]
+        # Check calculation against actual compressed size
+        assert sum(split_size) == x.numel(), f"Binary split error. Calculated sum {sum(split_size)} != Actual size {x.numel()}. Shape: {shape}, qN: {q_numel}, uN: {u_numel}, vN: {v_numel}"
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         split_size = [numel // 8, channel_size]
+        assert sum(split_size) == x.numel(), f"INT2 split error. Calculated sum {sum(split_size)} != Actual size {x.numel()}. Shape: {shape}"
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         split_size = [shape[0] * rank, shape[1] * rank]
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
@@ -105,9 +110,11 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
 
 
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        q = split_list[0].view(torch.uint8).view(channel_size, -1)
-        scale = split_list[1]
-        return dequantize_1bit(q, scale).view(shape)
+        q_half = split_list[0]
+        scale_u = split_list[1]
+        scale_v = split_list[2]
+        q = q_half.view(torch.uint8).view(channel_size, -1)
+        return dequantize_1bit(q, scale_u, scale_v).view(shape)
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         q = split_list[0].view(torch.uint8).view(-1, channel_size//4)
         scale = split_list[1]
@@ -151,11 +158,9 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         sparse = sim_topk(residual, sparse_ratio)
         return sparse + q
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_LOW_RANK:
-        scale = torch.matmul(*subspace_iter(x.abs(), rank, 2))
-        return sim_binary(x, scale)
+        raise NotImplementedError("BINARY_LOW_RANK simulation needs review with rank-1 scale change in sim_binary")
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2_LOW_RANK:
-        scale = torch.matmul(*subspace_iter(x.abs(), rank, 2))
-        return sim_int2(x, scale)
+        raise NotImplementedError("INT2_LOW_RANK simulation needs review")
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         u, v, q = subspace_iter(x, rank, 2)
         return torch.matmul(u, v)

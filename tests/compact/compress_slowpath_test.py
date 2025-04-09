@@ -86,14 +86,29 @@ def test_topk_sparsify(m, A, B_2m, seed):
 def test_1_bit_quantization(
     A, B_2m, seed
 ):
-    torch.manual_seed(seed)
-    for _ in range(LOOP_CNT):
+    # No need to set seed outside the loop if using fork_rng inside
+    # torch.manual_seed(seed)
+    for i in range(LOOP_CNT):
+        # Use a slightly different tensor each loop iter if desired, or keep fixed
+        loop_seed = seed + i # Ensure different input tensors per loop if needed
+        torch.manual_seed(loop_seed)
         input_tensor = torch.randn((A, B_2m), dtype=torch.half, device="cuda")
-        # Simulate 1-bit quantization in Python
-        quantized_simulated = sim_binary(input_tensor)
         
-        compressed_tensor, scale = quantize_1bit(input_tensor)
-        decompressed_tensor = dequantize_1bit(compressed_tensor, scale).view(input_tensor.shape)
+        # Simulate 1-bit quantization in Python with controlled RNG
+        with torch.random.fork_rng(devices=[input_tensor.device]):
+            torch.manual_seed(loop_seed) # Reset seed for sim
+            quantized_simulated = sim_binary(input_tensor)
+        
+        # Perform actual quantization/dequantization with controlled RNG
+        with torch.random.fork_rng(devices=[input_tensor.device]):
+            torch.manual_seed(loop_seed) # Reset seed for actual quant
+            compressed_tensor, scale_u, scale_v = quantize_1bit(input_tensor)
+        
+        # Dequantize using the results from the actual quantization
+        decompressed_tensor = dequantize_1bit(compressed_tensor, scale_u, scale_v)
+        # .view(input_tensor.shape) # dequantize_1bit now returns (N, C) matching input
+        
+        # Compare actual decompressed with simulated
         assert_tensor_approx(decompressed_tensor, quantized_simulated)
 
 
@@ -120,17 +135,18 @@ def test_compress_decompress_vs_sim(n, hidden, seed, compact_method, sparse_rati
     Uses a 3D tensor with dimensions (batch, n, hidden) to better represent typical model activations.
     """
     torch.manual_seed(seed)
-    for _ in range(LOOP_CNT):
+    for i in range(LOOP_CNT):
         # Generate a random 3D input tensor with a batch dimension
         input_tensor = torch.randn((n, hidden), dtype=torch.half, device="cuda")
         RANK = 2
+        loop_seed = seed + i
         # Use same seed scope for both operations, as lowrank requires random q
         with torch.random.fork_rng(devices=[input_tensor.device]):
-            torch.manual_seed(seed)
+            torch.manual_seed(loop_seed)
             # Get the simulated compression result
             simulated_result = sim_compress(input_tensor, compact_method, rank=RANK, sparse_ratio=sparse_ratio)
         with torch.random.fork_rng(devices=[input_tensor.device]):
-            torch.manual_seed(seed)    
+            torch.manual_seed(loop_seed)    
             # Perform actual compression
             compressed = slowpath_compress(input_tensor, compact_method, rank=RANK, sparse_ratio=sparse_ratio)
         
