@@ -138,13 +138,16 @@ def compact_compress(
         return x.view(original_shape)
     else:
         if _config.fastpath:
-            assert _config.compress_residual == 2 and compress_type == COMPACT_COMPRESS_TYPE.BINARY
+            assert compress_type == COMPACT_COMPRESS_TYPE.BINARY
             from xfuser.compact.fastpath import binary_quant_fastpath
             base = _cache.get_base(cache_key)
-            delta_base = _cache.get_delta_base(cache_key)
-            x_t = x.transpose(0, 1)
+            delta_base = _cache.get_delta_base(cache_key) if _config.compress_residual == 2 else None
+            x_t = x.transpose(0, 1).contiguous()
             q, scale_u, scale_v, new_base, new_delta_base = binary_quant_fastpath(
-                x_t, base, delta_base, update_cache, delta_decay_factor=_config.delta_decay_factor
+                x_t, base, delta_base,
+                update_cache=update_cache,
+                delta_decay_factor=_config.delta_decay_factor,
+                residual_level=_config.compress_residual
             )
             if update_cache:
                 _cache.put(cache_key, new_base, new_delta_base)
@@ -154,13 +157,16 @@ def compact_compress(
                 scale_v.flatten()
             ])
             if _config.log_compress_stats:
+                log_base = base.transpose(0, 1) if base is not None else None
+                log_delta_base = delta_base.transpose(0, 1) if delta_base is not None else None
+                log_recv_activation = new_base.transpose(0, 1) if new_base is not None else None
                 stats_log().log(
-                    cache_key, 
-                    base.transpose(0, 1), 
-                    delta_base.transpose(0, 1), 
-                    x, # before_comp_activation
-                    new_base.transpose(0, 1), # recv_activation (reconstructed base is logged here for fastpath)
-                    compressed, 
+                    cache_key,
+                    log_base,
+                    log_delta_base,
+                    x,
+                    log_recv_activation,
+                    compressed,
                     _config.compress_residual,
                     ref_activation_path=_config.ref_activation_path,
                     dump_activations=_config.dump_activations,
@@ -217,7 +223,6 @@ def compact_compress(
                     _decay_delta_base(new_delta_base),
                 )
                 if _config.log_compress_stats:
-                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base, 
@@ -283,7 +288,7 @@ def compact_decompress(
         return val.view(original_shape)
     else:
         if _config.fastpath:
-            assert _config.compress_residual == 2 and compress_type == COMPACT_COMPRESS_TYPE.BINARY
+            assert compress_type == COMPACT_COMPRESS_TYPE.BINARY, "Fastpath only supports BINARY compress type"
             from xfuser.compact.fastpath import binary_dequant_fastpath
             numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
             channel_size = shape[-1]
@@ -295,17 +300,21 @@ def compact_decompress(
             scale_v = compressed[numel // 16 + u_size: numel // 16 + u_size + v_size].flatten().contiguous()
             q = q.view(torch.uint8).view(channel_size, -1).contiguous()
 
-            reconstructed, new_delta_base = binary_dequant_fastpath(
+            base_cn = _cache.get_base(cache_key)
+            delta_base_cn = _cache.get_delta_base(cache_key) if _config.compress_residual == 2 else None
+
+            reconstructed_cn, new_delta_base_cn = binary_dequant_fastpath(
                 q,
                 scale_u,
                 scale_v,
-                _cache.get_base(cache_key),
-                _cache.get_delta_base(cache_key),
+                base_cn,
+                delta_base_cn,
                 delta_decay_factor=_config.delta_decay_factor,
+                residual_level=_config.compress_residual
             )
             if update_cache:
-                _cache.put(cache_key, reconstructed, new_delta_base)
-            reconstructed = reconstructed.transpose(0, 1)
+                _cache.put(cache_key, reconstructed_cn, new_delta_base_cn)
+            reconstructed = reconstructed_cn.transpose(0, 1).contiguous()
         else:
             if _config.compress_residual == 0:
                 reconstructed = _decompress_fn(compressed, compress_type, shape)

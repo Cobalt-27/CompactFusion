@@ -90,7 +90,6 @@ class CompactConfig:
         if residual == 2:
             assert ef, "2nd order compression requires error feedback enabled."
         if self.fastpath:
-            assert residual == 2, "Fastpath requires 2nd order compression."
             assert ef, "Fastpath requires error feedback enabled."
             assert not simulate, "Fastpath does not support simulation."
 
