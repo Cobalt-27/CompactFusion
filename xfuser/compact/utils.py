@@ -88,6 +88,9 @@ class CompactConfig:
         self.override_with_patch_gather_fwd = override_with_patch_gather_fwd
         self.patch_gather_fwd_config = patch_gather_fwd_config
         
+        
+        assert not override_with_patch_gather_fwd, "Currently BUGGY, do not use it"
+        
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
             "Cannot dump activations and calculate total error in the same run. Set one to False."
