@@ -10,6 +10,8 @@ from xfuser.prof import Profiler
 from xfuser.compact.stats import stats_log
 import os
 from xfuser.compact.slowpath import slowpath_compress, slowpath_decompress, sim_compress
+from xfuser.compact.patchpara.df_cache import AllGatherCache
+
 """
 COMPACT: Activation Compression with Delta Transmission and Error Feedback
 
@@ -41,6 +43,9 @@ def compact_init(config: CompactConfig):
     )
     global _step
     _step = None
+    if config.override_with_patch_gather_fwd:
+        global _allgather_cache
+        _allgather_cache = AllGatherCache()
 
 def compact_hello():
     if dist.get_rank() == 0:
@@ -68,6 +73,9 @@ def compact_get_step():
 def compact_cache():
     return _cache
 
+def allgather_cache():
+    global _allgather_cache
+    return _allgather_cache
 
 def compact_reset():
     global _cache
@@ -79,6 +87,9 @@ def compact_reset():
     stats_clear()
     global _step
     _step = None
+    if _config.override_with_patch_gather_fwd:
+        global _allgather_cache
+        _allgather_cache = AllGatherCache()
 
 
 @Profiler.prof_func("compact._compress_fn")
@@ -335,3 +346,33 @@ def compact_decompress(
         return reconstructed.view(original_shape)
     raise RuntimeError("should not reach here")
 
+def compact_all_gather(
+    tag,
+    x: torch.Tensor,
+    comp_type: COMPACT_COMPRESS_TYPE,
+    group=None,
+):
+    assert _config.enable_compress
+    rank = dist.get_rank(group)
+    my_key = f"{tag}-{rank}"
+    to_send = compact_compress(
+        my_key,
+        x,
+        comp_type,
+        update_cache=False,
+    )
+    world_size = dist.get_world_size(group)
+    buf_list = [torch.empty_like(to_send) for _ in range(world_size)]
+    with Profiler.scope("compact.all_gather"):
+        dist.all_gather(buf_list, to_send, group=group, async_op=False)
+    decompressed_list = [
+        compact_decompress(
+            f"{tag}-{i}",
+            buf,
+            comp_type,
+            x.shape,
+            update_cache=True,
+        )
+        for i, buf in enumerate(buf_list)
+    ]
+    return decompressed_list

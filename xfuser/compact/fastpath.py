@@ -454,27 +454,27 @@ def binary_dequant_fastpath(
     stride_newdb_c = new_db_ptr.stride(0) if residual_level == 2 else 0
     stride_newdb_n = new_db_ptr.stride(1) if residual_level == 2 else 0
 
-    with Profiler.scope("compact._binary_dequant_fastpath"):
-         _binary_dequant_fastpath[grid](
-             packed_in_cn8,
-             scale_u_c, scale_v_n,
-             base_cn, delta_base_ptr, # Pass potentially dummy delta_base
-             reconstructed_output_cn, new_db_ptr, # Pass potentially dummy new_db output
-             # --- Dimensions ---
-             N_TOKENS, CHANNEL, N_TOKENS_8,
-             # --- Strides ---
-             packed_in_cn8.stride(0), packed_in_cn8.stride(1),
-             scale_u_c.stride(0),
-             scale_v_n.stride(0),
-             base_cn.stride(0), base_cn.stride(1),
-             stride_dbc, stride_dbn, # Use potentially dummy strides
-             reconstructed_output_cn.stride(0), reconstructed_output_cn.stride(1),
-             stride_newdb_c, stride_newdb_n, # Use potentially dummy strides
-             # --- Meta-parameters ---
-             BLOCK_SIZE_N=BLOCK_SIZE_N,
-             DELTA_DECAY=float(delta_decay_factor),
-             RESIDUAL_LEVEL=residual_level, # Pass residual level
-         )
+    # with Profiler.scope("compact._binary_dequant_fastpath"):
+    _binary_dequant_fastpath[grid](
+        packed_in_cn8,
+        scale_u_c, scale_v_n,
+        base_cn, delta_base_ptr, # Pass potentially dummy delta_base
+        reconstructed_output_cn, new_db_ptr, # Pass potentially dummy new_db output
+        # --- Dimensions ---
+        N_TOKENS, CHANNEL, N_TOKENS_8,
+        # --- Strides ---
+        packed_in_cn8.stride(0), packed_in_cn8.stride(1),
+        scale_u_c.stride(0),
+        scale_v_n.stride(0),
+        base_cn.stride(0), base_cn.stride(1),
+        stride_dbc, stride_dbn, # Use potentially dummy strides
+        reconstructed_output_cn.stride(0), reconstructed_output_cn.stride(1),
+        stride_newdb_c, stride_newdb_n, # Use potentially dummy strides
+        # --- Meta-parameters ---
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        DELTA_DECAY=float(delta_decay_factor),
+        RESIDUAL_LEVEL=residual_level, # Pass residual level
+    )
 
     # Return recon and potentially new_delta_base (None if level 1)
     return reconstructed_output_cn, new_delta_base_output_cn

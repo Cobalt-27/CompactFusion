@@ -2,7 +2,7 @@ import torch
 import torch.distributed as dist
 from xfuser.prof import Profiler
 from enum import Enum
-
+from xfuser.compact.patchpara.df_utils import PatchConfig
 
 class COMPACT_COMPRESS_TYPE(Enum):
     """
@@ -30,6 +30,8 @@ class CompactConfig:
     def __init__(
         self,
         enabled: bool = False,
+        override_with_patch_gather_fwd: bool = False,
+        patch_gather_fwd_config: PatchConfig = None,
         compress_func: callable = None,
         sparse_ratio=None,
         comp_rank=None,
@@ -83,6 +85,9 @@ class CompactConfig:
         self.calc_total_error = calc_total_error
         self.delta_decay_factor = delta_decay_factor
         
+        self.override_with_patch_gather_fwd = override_with_patch_gather_fwd
+        self.patch_gather_fwd_config = patch_gather_fwd_config
+        
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
             "Cannot dump activations and calculate total error in the same run. Set one to False."
@@ -92,6 +97,11 @@ class CompactConfig:
         if self.fastpath:
             assert ef, "Fastpath requires error feedback enabled."
             assert not simulate, "Fastpath does not support simulation."
+        
+        if self.override_with_patch_gather_fwd:
+            assert self.patch_gather_fwd_config is not None, "patch_gather_fwd_config must be set if override_with_patch_gather_fwd is True"
+        else:
+            assert self.patch_gather_fwd_config is None, "patch_gather_fwd_config must be None if override_with_patch_gather_fwd is False"
 
 
 from xfuser.compact.compress_quantize import quantize_int8, dequantize_int8
@@ -107,7 +117,7 @@ class CompactCache:
         self.passed_count = 0
         self.subspace_iters = 2
 
-    @Profiler.prof_func("compact.CompactCache.put")
+    # @Profiler.prof_func("compact.CompactCache.put")
     def put(self, key, base, delta_base):
         # Quantize base if needed
         if self.quantize:
@@ -130,7 +140,7 @@ class CompactCache:
         else:
             self.delta_base[key] = None
 
-    @Profiler.prof_func("compact.CompactCache.get_base")
+    # @Profiler.prof_func("compact.CompactCache.get_base")
     def get_base(self, key):
         base = self.base.get(key, None)
         if self.quantize:
@@ -138,7 +148,7 @@ class CompactCache:
                 base = dequantize_int8(*base)
         return base
 
-    @Profiler.prof_func("compact.CompactCache.get_delta_base") 
+    # @Profiler.prof_func("compact.CompactCache.get_delta_base") 
     def get_delta_base(self, key):
         # Retrieve stored item for delta_base
         stored_item = self.delta_base.get(key, None)

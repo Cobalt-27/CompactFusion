@@ -176,10 +176,10 @@ class xFuserLongContextAttention(LongContextAttention):
             self.idx = ATTN_LAYER_IDX
             ATTN_LAYER_IDX += 1
         from xfuser.compact.main import compact_config, compact_get_step
-        from xfuser.compact.ring import compact_ring_fwd
+        from xfuser.compact.ring import compact_fwd
         if compact_config().enable_compress:
             # assert not self.use_kv_cache
-            out = compact_ring_fwd(
+            out = compact_fwd(
                 query_layer,
                 key_layer,
                 value_layer,
