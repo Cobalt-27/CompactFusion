@@ -64,7 +64,7 @@ class CompactConfig:
             calc_total_error (bool): If True and path is set, calculate error against reference.
             delta_decay_factor (float): Decay factor applied to delta_base in 2nd order residual.
         """
-        self.enable_compress = enabled
+        self.enabled = enabled
         self.compress_func = compress_func
         self.sparse_ratio = sparse_ratio
         self.comp_rank = comp_rank
@@ -89,7 +89,6 @@ class CompactConfig:
         self.patch_gather_fwd_config = patch_gather_fwd_config
         
         
-        assert not override_with_patch_gather_fwd, "Currently BUGGY, do not use it"
         
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \

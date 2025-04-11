@@ -71,7 +71,7 @@ class CacheManager:
         **kwargs,
     ):
         from xfuser.compact.main import compact_config
-        assert not compact_config().enable_compress
+        assert not compact_config().enabled
         return_list = False
         if isinstance(new_kv, List):
             return_list = True

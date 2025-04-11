@@ -302,7 +302,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
             # Add condition to check if compact compression is enabled
-            if not compact_config().enable_compress:
+            if not compact_config().enabled:
                 key, value = get_cache_manager().update_and_get_kv_cache(
                     new_kv=[key, value],
                     layer=attn,
@@ -463,7 +463,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
             # Add condition to check if compact compression is enabled
-            if not compact_config().enable_compress:
+            if not compact_config().enabled:
                 key, value = get_cache_manager().update_and_get_kv_cache(
                     new_kv=[key, value],
                     layer=attn,
@@ -706,7 +706,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
                 [num_encoder_hidden_states_tokens, num_query_tokens], dim=2
             )
             # Add condition to check if compact compression is enabled
-            if not compact_config().enable_compress:
+            if not compact_config().enabled:
                 key, value = get_cache_manager().update_and_get_kv_cache(
                     new_kv=[key, value],
                     layer=attn,
@@ -908,7 +908,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
         #! ---------------------------------------- KV CACHE ----------------------------------------
         if not self.use_long_ctx_attn_kvcache:
             # Add condition to check if compact compression is enabled
-            if not compact_config().enable_compress:
+            if not compact_config().enabled:
                 key, value = get_cache_manager().update_and_get_kv_cache(
                     new_kv=[key, value],
                     layer=attn,

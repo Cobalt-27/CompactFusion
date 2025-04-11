@@ -50,13 +50,18 @@ def compact_init(config: CompactConfig):
 def compact_hello():
     if dist.get_rank() == 0:
         print(f"🐳  Compact initialized")
-        print(f"🟦  Compact enabled" if _config.enable_compress else "🟫  Compact disabled")
-        if _config.enable_compress:
-            print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
-            print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
-            print(f"🟦  Check Consistency" if _config.check_cache_consistency else "🟫  No check consistency")
-            print(f"🟦  Dump Activations" if _config.dump_activations else "🟫  No dump activations")
-            print(f"🟦  Calculate Total Error" if _config.calc_total_error else "🟫  No calculate total error")
+        print(f"🟦  Compact enabled" if _config.enabled else "🟫  Compact disabled")
+        if _config.enabled:
+            if not _config.override_with_patch_gather_fwd:
+                print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
+                print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
+                print(f"🟦  Check consistency" if _config.check_cache_consistency else "🟫  No check consistency")
+                print(f"🟦  Dump activations" if _config.dump_activations else "🟫  No dump activations")
+                print(f"🟦  Calculate total error" if _config.calc_total_error else "🟫  No calculate total error")
+            else:
+                print(f"🟧  Overrided to Patch Para")
+                patch_config = _config.patch_gather_fwd_config
+                print(f"🟨  Using DistriFusion" if patch_config.async_comm else "🟫  Sync patch para")
 
 def compact_config():
     return _config
@@ -115,7 +120,7 @@ def compact_compress(
     update_cache: bool = False,
 ):
     assert x.is_contiguous()
-    assert _config.enable_compress
+    assert _config.enabled
     original_shape = x.shape
     if len(x.shape) >= 4:
         x = x.view(-1, x.shape[-2] * x.shape[-1])
@@ -266,7 +271,7 @@ def compact_decompress(
     shape: tuple,
     update_cache: bool = False,
 ):
-    assert _config.enable_compress
+    assert _config.enabled
     original_shape = shape
     if len(shape) >= 4:
         # TODO: check tensor layout for all_gather
@@ -373,7 +378,8 @@ def compact_all_gather(
     comp_type: COMPACT_COMPRESS_TYPE,
     group=None,
 ):
-    assert _config.enable_compress
+    raise NotImplementedError("Compact all gather is inconsistent with ring impl.")
+    assert _config.enabled
     rank = dist.get_rank(group)
     my_key = f"{tag}-{rank}"
     to_send = compact_compress(
