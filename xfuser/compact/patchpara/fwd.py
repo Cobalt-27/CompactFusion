@@ -113,11 +113,12 @@ def patch_gather_fwd(
         # --- Asynchronous Communication (DistriFusion) --- #
         k_cache_key = f'{mod_idx}-k'
         v_cache_key = f'{mod_idx}-v'
+        # print(f"k_cache_key: {k_cache_key}, v_cache_key: {v_cache_key}")
         with Profiler.scope("df.all_gather"):
             if current_iter < config.async_warmup:
                 # --- Warmup Phase (Sync Gather + Cache Dummy Handle) --- #
-                k_list = [torch.empty_like(k) for _ in range(world_size)]
-                v_list = [torch.empty_like(v) for _ in range(world_size)]
+                k_list = [torch.empty_like(k).contiguous() for _ in range(world_size)]
+                v_list = [torch.empty_like(v).contiguous() for _ in range(world_size)]
                 # Perform actual sync gather
                 dist.all_gather(k_list, k, group=process_group)
                 dist.all_gather(v_list, v, group=process_group)
@@ -147,11 +148,14 @@ def patch_gather_fwd(
                 # Use the received data for computation in *this* step
                 k_list_for_computation = prev_k_list
                 v_list_for_computation = prev_v_list
-
+                
+                # update with fresh k v
+                k_list_for_computation[rank] = k.clone()
+                v_list_for_computation[rank] = v.clone()
                 # Launch the *current* step's async gather for the *next* step
                 # Prepare receive buffers for the next step's gather
-                next_k_list = [torch.empty_like(k) for _ in range(world_size)]
-                next_v_list = [torch.empty_like(v) for _ in range(world_size)]
+                next_k_list = [torch.empty_like(k).contiguous() for _ in range(world_size)]
+                next_v_list = [torch.empty_like(v).contiguous() for _ in range(world_size)]
 
                 # Launch async all_gather
                 k_handle = dist.all_gather(next_k_list, k, group=process_group, async_op=True)
