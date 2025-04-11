@@ -16,12 +16,9 @@ class COMPACT_COMPRESS_TYPE(Enum):
     WARMUP = "warmup"
     SPARSE = "sparse"
     BINARY = "binary"
+    BINARY_MEAN_AS_SCALE = "binary-mean-as-scale"
     INT2 = "int2"
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
-    BINARY_SPARSE = "binary-sparse"
-    INT2_SPARSE = "int2-sparse"
-    BINARY_LOW_RANK = "binary-low-rank"
-    INT2_LOW_RANK = "int2-low-rank"
     LOW_RANK = "low-rank"
 
 
@@ -42,7 +39,7 @@ class CompactConfig:
         check_consist: bool = False,
         fastpath: bool = False,
         quantized_cache: bool = False,
-        low_rank_dim: int | None = None,
+        cache_low_rank_dim: int | None = None,
         ref_activation_path: str | None = None,
         dump_activations: bool = False,
         calc_total_error: bool = False,
@@ -78,7 +75,7 @@ class CompactConfig:
         self.fastpath = fastpath
         # Cache behavior flags
         self.quantized_cache = quantized_cache
-        self.low_rank_dim = low_rank_dim
+        self.cache_low_rank_dim = cache_low_rank_dim
         # Updated attributes
         self.ref_activation_path = ref_activation_path
         self.dump_activations = dump_activations

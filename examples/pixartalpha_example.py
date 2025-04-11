@@ -62,7 +62,7 @@ def main():
         calc_total_error=False,
         delta_decay_factor=0.5,
         quantized_cache=False,
-        low_rank_dim=None
+        cache_low_rank_dim=None
     )
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion

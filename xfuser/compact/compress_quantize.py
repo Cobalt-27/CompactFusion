@@ -244,7 +244,7 @@ def _dequantize_1bit_kernel(
         # Store the dequantized values, masking invalid elements using unpacked mask
         tl.store(output_ptrs, scaled, mask=mask_b_8)
 
-def sim_binary(input_tensor: torch.Tensor, rank: int = 1) -> torch.Tensor:
+def sim_binary(input_tensor: torch.Tensor, rank: int|None = None, use_mean_as_scale: bool = False) -> torch.Tensor:
     """
     Simulates channel-wise 1-bit quantization using rank-k scale approximation.
     Args:
@@ -254,16 +254,19 @@ def sim_binary(input_tensor: torch.Tensor, rank: int = 1) -> torch.Tensor:
         A tensor of the same size as the input, representing the dequantized result.
     """
     # NOTE: must use mean, otherwise the dequantized tensor's norm is too large, resulting nonsensical output
-    # scale = torch.mean(torch.abs(input_tensor), dim=tuple(range(input_tensor.ndim - 1)), keepdim=True) if scale is None else scale
-    from xfuser.compact.compress_lowrank import svd, subspace_iter
-    # # u, v = svd(torch.abs(input_tensor), 2)
-    # We input with a transposed shape (C, N) to align with fastpath
-    # But this shape change does not affect u and v as we swap them back
-    RANK=rank
-    v, u, _ = subspace_iter(torch.abs(input_tensor).transpose(0, 1), RANK, 2)
-    u = u.transpose(0, 1)
-    v = v.transpose(0, 1)
-    scale = u @ v
+    if use_mean_as_scale:
+        assert rank is None
+        scale = torch.mean(torch.abs(input_tensor), dim=tuple(range(input_tensor.ndim - 1)), keepdim=True)
+    else:
+        from xfuser.compact.compress_lowrank import svd, subspace_iter
+        # # u, v = svd(torch.abs(input_tensor), 2)
+        # We input with a transposed shape (C, N) to align with fastpath
+        # But this shape change does not affect u and v as we swap them back
+        RANK=rank
+        v, u, _ = subspace_iter(torch.abs(input_tensor).transpose(0, 1), RANK, 2)
+        u = u.transpose(0, 1)
+        v = v.transpose(0, 1)
+        scale = u @ v
     assert scale.dtype == torch.half, "Scale must be FP16"
     # Quantize to -1 or 1 based on the sign
     quantized_tensor = torch.sign(input_tensor)

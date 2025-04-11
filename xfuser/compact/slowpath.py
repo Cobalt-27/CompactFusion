@@ -140,20 +140,14 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         return sim_topk(x, sparse_ratio)
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY:
         assert rank is not None
-        return sim_binary(x, rank=rank) # Pass rank to sim_binary
+        return sim_binary(x, rank=rank, use_mean_as_scale=False) # Pass rank to sim_binary
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         return sim_int2(x)
-    elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_SPARSE:
-        raise NotImplementedError("BINARY_SPARSE simulation needs review")
-    elif compress_type == COMPACT_COMPRESS_TYPE.INT2_SPARSE:
-        raise NotImplementedError("INT2_SPARSE simulation needs review")
-    elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_LOW_RANK:
-        raise NotImplementedError("BINARY_LOW_RANK simulation needs review")
-    elif compress_type == COMPACT_COMPRESS_TYPE.INT2_LOW_RANK:
-        raise NotImplementedError("INT2_LOW_RANK simulation needs review")
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None
         u, v, _ = subspace_iter(x, rank, 2) # Use provided rank
         return torch.matmul(u, v)
+    elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_MEAN_AS_SCALE:
+        return sim_binary(x, use_mean_as_scale=True)
     else:
         raise ValueError("Invalid compress_type value")
