@@ -9,8 +9,6 @@ from xfuser.compact.compress_topk import (
 from xfuser.compact.compress_quantize import (
     quantize_1bit,
     dequantize_1bit,
-    quantize_int2,
-    dequantize_int2,
     sim_binary,
     sim_int2,
 )
@@ -29,7 +27,7 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
     Args:
         x: Input tensor to compress. Must be FP16.
         compress_type: The compression type to use.
-        rank: The rank parameter for low-rank compression methods.
+        rank: The rank parameter for low-rank or binary compression methods.
         sparse_ratio: The sparsity ratio for sparse compression methods.
         
     Returns:
@@ -37,26 +35,24 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
     """
     assert x.dtype == torch.half, f"x.dtype: {x.dtype}"
     assert x.dim() == 2
+    N, C = x.shape
+
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        q, scale_u, scale_v = quantize_1bit(x)
+        assert rank is not None and rank >= 1, "Rank must be provided for BINARY compression"
+        q, scale_u, scale_v = quantize_1bit(x, rank=rank) # Pass rank
         assert q.dtype == torch.uint8
-        assert scale_u.dtype == torch.half
-        assert scale_v.dtype == torch.half
-        comp_list = [q.view(torch.half).contiguous(), scale_u.contiguous(), scale_v.contiguous()]
-    elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
-        q, scale = quantize_int2(x)
-        # NOTE: Casting all non-half tensors to half
-        assert q.dtype == torch.uint8
-        assert scale.dtype == torch.half
-        q = q.view(torch.half)
-        comp_list = [q, scale]
-        assert q.size(1) == scale.size(1) // 4
+        assert scale_u.dtype == torch.half and scale_u.shape == (N, rank)
+        assert scale_v.dtype == torch.half and scale_v.shape == (rank, C)
+        # Flatten u and v for concatenation
+        comp_list = [q.view(torch.half).contiguous(), scale_u.view(-1).contiguous(), scale_v.view(-1).contiguous()]
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
+        assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK compression"
         u, v, _ = subspace_iter(x, rank, 2)
         assert u.size(1) == v.size(0) and u.dtype == torch.half and v.dtype == torch.half
         # contiguous() is necessary for later cat
         comp_list = [u.contiguous(), v.contiguous()]
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
+        assert sparse_ratio is not None, "sparse_ratio must be provided for SPARSE compression"
         val, idx = topk_compress(x.view(-1, SPARSE_LAST_DIM_SIZE), sparse_ratio)
         comp_list = [val, idx.view(torch.half)]
     else:
@@ -73,33 +69,32 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
         x: Compressed tensor to decompress. Must be FP16.
         shape: The original shape of the tensor.
         compress_type: The compression type used for compression.
-        rank: The rank parameter for low-rank compression methods.
+        rank: The rank parameter for low-rank or binary compression methods.
         sparse_ratio: The sparsity ratio for sparse compression methods.
         
     Returns:
         The decompressed tensor with the specified shape.
     """
     assert x.dim() == 1 # NOTE: we previously flattened the cat_list
-    channel_size = shape[-1]
     assert len(shape) == 2
+    N, C = shape # Get N and C explicitly
+    numel = N * C
     
     assert x.dtype == torch.half
-    numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
-    N, C = shape # Get N and C explicitly
 
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        q_numel = numel // 8 # Correct: num UINT8 elements for q
-        u_numel = N       # Correct: num FP16 elements for scale_u
-        v_numel = C       # Correct: num FP16 elements for scale_v
+        assert rank is not None and rank >= 1, "Rank must be provided for BINARY decompression"
+        q_numel_uint8 = numel // 8 # Number of UINT8 elements for q
+        q_numel_half = q_numel_uint8 // 2 # Number of FP16 elements for q (packed)
+        u_numel_half = N * rank       # Number of FP16 elements for scale_u
+        v_numel_half = rank * C       # Number of FP16 elements for scale_v
         # Split sizes are in terms of FP16 elements
-        split_size = [q_numel // 2, u_numel, v_numel]
+        split_size = [q_numel_half, u_numel_half, v_numel_half]
         # Check calculation against actual compressed size
-        assert sum(split_size) == x.numel(), f"Binary split error. Calculated sum {sum(split_size)} != Actual size {x.numel()}. Shape: {shape}, qN: {q_numel}, uN: {u_numel}, vN: {v_numel}"
-    elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
-        split_size = [numel // 8, channel_size]
-        assert sum(split_size) == x.numel(), f"INT2 split error. Calculated sum {sum(split_size)} != Actual size {x.numel()}. Shape: {shape}"
+        assert sum(split_size) == x.numel(), f"Binary split error. Calculated sum {sum(split_size)} != Actual size {x.numel()}. Shape: {shape}, Rank: {rank}, qN_h: {q_numel_half}, uN_h: {u_numel_half}, vN_h: {v_numel_half}"
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
-        split_size = [shape[0] * rank, shape[1] * rank]
+        assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK decompression"
+        split_size = [N * rank, rank * C] # Correct shape for u(N,K) and v(K,C)
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
         # val and idx have same count, but idx is 4-bit
         split_size = [numel // sparse_ratio, numel // sparse_ratio // 4]
@@ -108,20 +103,19 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
 
     split_list = torch.split(x, split_size, dim=0)
 
-
     if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
         q_half = split_list[0]
-        scale_u = split_list[1]
-        scale_v = split_list[2]
-        q = q_half.view(torch.uint8).view(channel_size, -1)
+        scale_u_flat = split_list[1]
+        scale_v_flat = split_list[2]
+        # Reshape q from FP16 view -> UINT8 view -> (C, N//8)
+        q = q_half.view(torch.uint8).view(C, N // 8)
+        # Reshape scales to (N, K) and (K, C)
+        scale_u = scale_u_flat.view(N, rank)
+        scale_v = scale_v_flat.view(rank, C)
         return dequantize_1bit(q, scale_u, scale_v).view(shape)
-    elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
-        q = split_list[0].view(torch.uint8).view(-1, channel_size//4)
-        scale = split_list[1]
-        return dequantize_int2(q, scale).view(shape)
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
-        u = split_list[0].view(shape[0], rank)
-        v = split_list[1].view(rank, shape[1])
+        u = split_list[0].view(N, rank) # Reshape to (N, K)
+        v = split_list[1].view(rank, C) # Reshape to (K, C)
         return torch.matmul(u, v)
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
         idx_last_dim_size = SPARSE_LAST_DIM_SIZE//sparse_ratio
@@ -142,27 +136,24 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
     if compress_type == COMPACT_COMPRESS_TYPE.IDENTITY:
         return x
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
+        assert sparse_ratio is not None
         return sim_topk(x, sparse_ratio)
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        return sim_binary(x)
+        assert rank is not None
+        return sim_binary(x, rank=rank) # Pass rank to sim_binary
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         return sim_int2(x)
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_SPARSE:
-        q = sim_binary(x)
-        residual = x - q
-        sparse = sim_topk(residual, sparse_ratio)
-        return sparse + q
+        raise NotImplementedError("BINARY_SPARSE simulation needs review")
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2_SPARSE:
-        q = sim_int2(x)
-        residual = x - q
-        sparse = sim_topk(residual, sparse_ratio)
-        return sparse + q
+        raise NotImplementedError("INT2_SPARSE simulation needs review")
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_LOW_RANK:
-        raise NotImplementedError("BINARY_LOW_RANK simulation needs review with rank-1 scale change in sim_binary")
+        raise NotImplementedError("BINARY_LOW_RANK simulation needs review")
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2_LOW_RANK:
         raise NotImplementedError("INT2_LOW_RANK simulation needs review")
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
-        u, v, q = subspace_iter(x, rank, 2)
+        assert rank is not None
+        u, v, _ = subspace_iter(x, rank, 2) # Use provided rank
         return torch.matmul(u, v)
     else:
         raise ValueError("Invalid compress_type value")

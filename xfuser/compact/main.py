@@ -154,19 +154,23 @@ def compact_compress(
             base = _cache.get_base(cache_key)
             delta_base = _cache.get_delta_base(cache_key) if _config.compress_residual == 2 else None
             x_t = x.transpose(0, 1).contiguous()
-            q, scale_u, scale_v, new_base, new_delta_base = binary_quant_fastpath(
-                x_t, base, delta_base,
+            q, scale_u_ck, scale_v_kn, new_base, new_delta_base = binary_quant_fastpath(
+                x_tensor_cn=x_t,
+                base_tensor_cn=base,
+                delta_base_tensor_cn=delta_base,
+                rank=_config.comp_rank,
                 update_cache=update_cache,
                 delta_decay_factor=_config.delta_decay_factor,
                 residual_level=_config.compress_residual
             )
             if update_cache:
                 _cache.put(cache_key, new_base, new_delta_base)
-            compressed = torch.cat([
-                q.flatten().view(torch.half),
-                scale_u.flatten(),
-                scale_v.flatten()
-            ])
+
+            q_flat_half = q.view(torch.half).flatten()
+            u_flat_half = scale_u_ck.flatten()
+            v_flat_half = scale_v_kn.flatten()
+            compressed = torch.cat([q_flat_half, u_flat_half, v_flat_half], dim=0)
+
             if _config.log_compress_stats:
                 log_base = base.transpose(0, 1) if base is not None else None
                 log_delta_base = delta_base.transpose(0, 1) if delta_base is not None else None
@@ -301,25 +305,42 @@ def compact_decompress(
         if _config.fastpath:
             assert compress_type == COMPACT_COMPRESS_TYPE.BINARY, "Fastpath only supports BINARY compress type"
             from xfuser.compact.fastpath import binary_dequant_fastpath
-            numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
-            channel_size = shape[-1]
-            u_size = channel_size
-            v_size = shape[0]
-            assert compressed.numel() == numel // 16 + u_size + v_size, f"Mismatch in compressed tensor size: expected {numel // 16 + u_size + v_size}, got {compressed.numel()}"
-            q = compressed[:numel // 16]
-            scale_u = compressed[numel // 16:numel // 16 + u_size].flatten().contiguous()
-            scale_v = compressed[numel // 16 + u_size: numel // 16 + u_size + v_size].flatten().contiguous()
-            q = q.view(torch.uint8).view(channel_size, -1).contiguous()
+
+            N, C = shape # Original shape (N, C) after reshape
+            rank = _config.comp_rank
+            assert N % 8 == 0
+
+            # Calculate split sizes for packed(uint8), scale_u(C,K), scale_v(K,N)
+            q_numel_uint8 = C * (N // 8)
+            q_numel_half = q_numel_uint8 // 2 # Stored as half
+            u_numel_half = C * rank             # U is (C, K)
+            v_numel_half = rank * N             # V is (K, N)
+
+            expected_numel = q_numel_half + u_numel_half + v_numel_half
+            assert compressed.numel() == expected_numel, \
+                f"Mismatch in compressed tensor size: expected {expected_numel} (q={q_numel_half}, u={u_numel_half}, v={v_numel_half}), got {compressed.numel()}"
+
+            # Split the compressed tensor
+            q_half, scale_u_flat, scale_v_flat = torch.split(
+                compressed,
+                [q_numel_half, u_numel_half, v_numel_half]
+            )
+
+            # Reshape
+            packed_cn8 = q_half.view(torch.uint8).view(C, N // 8)
+            scale_u_ck = scale_u_flat.view(C, rank)
+            scale_v_kn = scale_v_flat.view(rank, N) # <<< Reshape V to (K, N)
 
             base_cn = _cache.get_base(cache_key)
             delta_base_cn = _cache.get_delta_base(cache_key) if _config.compress_residual == 2 else None
 
             reconstructed_cn, new_delta_base_cn = binary_dequant_fastpath(
-                q,
-                scale_u,
-                scale_v,
-                base_cn,
-                delta_base_cn,
+                packed_in_cn8=packed_cn8,
+                scale_u_ck=scale_u_ck,
+                scale_v_kn=scale_v_kn, # <<< Pass V(K, N)
+                base_cn=base_cn,
+                delta_base_cn=delta_base_cn,
+                rank=rank,
                 delta_decay_factor=_config.delta_decay_factor,
                 residual_level=_config.compress_residual
             )
