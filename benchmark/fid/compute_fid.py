@@ -150,13 +150,13 @@ def main():
     
     try:
         # Compute FID
-        # score = compute_fid_score(args.ref, args.sample, args.device)
+        score = compute_fid_score(args.ref, args.sample, args.device)
         
         # Compute LPIPS
         lpips_mean, psnr_mean = compute_lpips_score(args.ref, args.sample, args.device)
         
         # Output result
-        # logging.info(f"FID score: {score:.4f}")
+        logging.info(f"FID score: {score:.4f}")
         logging.info(f"LPIPS score: {lpips_mean:.4f}")
         logging.info(f"PSNR score: {psnr_mean:.4f}")
         
