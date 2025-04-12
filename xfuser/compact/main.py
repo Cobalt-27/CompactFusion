@@ -54,6 +54,7 @@ def compact_hello():
             print(f"🟦  Calculate Total Error" if _config.calc_total_error else "🟫  No calculate total error")
 
 def compact_config():
+    global _config
     return _config
 
 def compact_set_step(step):

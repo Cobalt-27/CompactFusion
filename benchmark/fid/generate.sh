@@ -1,16 +1,16 @@
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
-export CAPTION_FILE="dataset_coco.json"
-export SAMPLE_IMAGES_FOLODER="sample_images"
+export CAPTION_FILE="ref_images/prompts.json"
+export SAMPLE_IMAGES_FOLODER="generated_images_flux"
 
 # Select the model type
-export MODEL_TYPE="Pixart-alpha"
+export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
-    ["Pixart-alpha"]="pixartalpha_generate.py /cfs/dit/PixArt-XL-2-256-MS 20"
-    ["Flux"]="flux_generate.py /cfs/dit/FLUX.1-dev 28"
+    ["Pixart-alpha"]="pixartalpha_generate.py PixArt-alpha/PixArt-XL-2-1024-MS 20"
+    ["Flux"]="flux_generate.py black-forest-labs/FLUX.1-dev 28"
 )
 
 if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then
@@ -22,10 +22,11 @@ else
 fi
 
 # task args
-TASK_ARGS="--height 256 --width 256 --no_use_resolution_binning"
+TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
-N_GPUS=8
-PARALLEL_ARGS="--pipefusion_parallel_degree 8 --ulysses_degree 1 --ring_degree 1"
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+N_GPUS=4
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 4"
 
 torchrun --nproc_per_node=$N_GPUS ./benchmark/fid/$SCRIPT \
 --model $MODEL_ID \
@@ -35,7 +36,6 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "brown dog laying on the ground with a metal bowl in front of him." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

@@ -78,7 +78,6 @@ def main():
         torch_dtype=DTYPE,
         text_encoder_2=text_encoder_2,
     )
-    print(pipe)
 
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
