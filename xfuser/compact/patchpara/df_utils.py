@@ -6,6 +6,7 @@ class PatchConfig:
                  async_comm: bool,
                  async_warmup: int,
                  ) -> None:
+        assert not use_compact, "Compact seems to be buggy, results are inconsistent with ring impl."
         self.use_compact = use_compact
         self.async_comm = async_comm # Enable DistriFusion
         self.async_warmup = async_warmup

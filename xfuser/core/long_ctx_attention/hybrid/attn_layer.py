@@ -57,7 +57,7 @@ class xFuserLongContextAttention(LongContextAttention):
         COMPACT ATTN
         """
         from xfuser.compact.main import compact_config
-        if compact_config().enable_compress:
+        if compact_config().enabled:
             self.ring_attn_fn = None
         else:
             self.ring_attn_fn = xdit_ring_flash_attn_func
@@ -177,7 +177,7 @@ class xFuserLongContextAttention(LongContextAttention):
             ATTN_LAYER_IDX += 1
         from xfuser.compact.main import compact_config, compact_get_step
         from xfuser.compact.ring import compact_fwd
-        if compact_config().enable_compress:
+        if compact_config().enabled:
             # assert not self.use_kv_cache
             out = compact_fwd(
                 query_layer,

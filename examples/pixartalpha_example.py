@@ -33,8 +33,8 @@ def main():
     
     from xfuser.compact.patchpara.df_utils import PatchConfig
     prepared_patch_config = PatchConfig(
-        use_compact=True,
-        async_comm=False,
+        use_compact=False,
+        async_comm=True,
         async_warmup=2,
     )
     OVERRIDE_WITH_PATCH_PARA = False
@@ -62,10 +62,10 @@ def main():
         calc_total_error=False,
         delta_decay_factor=0.5,
         quantized_cache=False,
-        low_rank_dim=None
+        cache_low_rank_dim=None
     )
     compact_init(compact_config)
-    if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
+    if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     torch.distributed.barrier()
 
@@ -82,7 +82,7 @@ def main():
     pipe.vae.enable_tiling()
     
     compact_hello()
-    LOOP_COUNT = 4
+    LOOP_COUNT = 1
 
     for _ in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
