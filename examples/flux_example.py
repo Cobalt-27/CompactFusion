@@ -40,15 +40,15 @@ def main():
     from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
     from xfuser.prof import Profiler, prof_summary, set_torch_profiler
     from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK
     compact_config = CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 6 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-        comp_rank=16,
-        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        comp_rank=8,
+        residual=2, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True, 
-        simulate=True,
+        simulate=False,
         log_stats=True,
         check_consist=False,
         fastpath=False,
@@ -78,7 +78,6 @@ def main():
         torch_dtype=DTYPE,
         text_encoder_2=text_encoder_2,
     )
-    print(pipe)
 
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
@@ -112,15 +111,18 @@ def main():
             end_time = time.time()
             elapsed_time = end_time - start_time
             peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
-            Profiler.instance().enable()
+            # Profiler.instance().enable()
 
-        from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues
+        from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
         if local_rank == 0:
             stats_verbose()
-            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            print(str.join("\n", prof_result))
-            plot_eigenvalues(key="0-0-k", step=1, save_path="./results/eigenvalues_0-0-k.png")
-
+            # prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            # print(str.join("\n", prof_result))
+            plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # save_eigenvalues(save_dir="./results/eigenvalues")
+            
     parallel_info = (
         f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"
         f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"

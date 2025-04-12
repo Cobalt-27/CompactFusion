@@ -3,7 +3,7 @@ set -x
 export PYTHONPATH=$PWD:$PYTHONPATH
 
 # Select the model type
-export MODEL_TYPE="Pixart-alpha"
+export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
@@ -33,9 +33,9 @@ TASK_ARGS="--height $IMG_SIZE --width $IMG_SIZE --no_use_resolution_binning"
 # CACHE_ARGS="--use_fbcache"
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-N_GPUS=4
-PARALLEL_ARGS="--ulysses_degree 1 --ring_degree $N_GPUS --pipefusion_parallel_degree 1" #--pipefusion_parallel_degree 1
+export CUDA_VISIBLE_DEVICES=0,1
+N_GPUS=2
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 2 --pipefusion_parallel_degree 1" #--pipefusion_parallel_degree 1
 
 # CFG_ARGS="--use_cfg_parallel"
 

@@ -37,7 +37,7 @@ def main():
         async_comm=False,
         async_warmup=2,
     )
-    OVERRIDE_WITH_PATCH_PARA = True
+    OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
     
     from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
@@ -45,7 +45,7 @@ def main():
     from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
-        enabled=True,
+        enabled=False,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
         compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
