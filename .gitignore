@@ -21,3 +21,4 @@ generated_images*/
 original_images/
 ref_images/
 *.parquet
+*.whl

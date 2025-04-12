@@ -20,8 +20,7 @@ features = Features({
 })
 
 def get_dataset():
-    parquet_dir = "/mnt/datasets"
-    parquet_dir = os.path.join(parquet_dir, "validation_files")
+    parquet_dir = "/root/autodl-tmp/datasets"
     validation_files = [os.path.join(parquet_dir, f) for f in os.listdir(parquet_dir) if f.startswith("coco-validation") and f.endswith(".parquet")]
     dataset = Dataset.from_parquet(validation_files, features=features)
     return dataset

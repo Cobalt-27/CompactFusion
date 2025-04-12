@@ -9,8 +9,8 @@ export MODEL_TYPE="Flux"
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
-    ["Pixart-alpha"]="pixartalpha_generate.py PixArt-alpha/PixArt-XL-2-1024-MS 20"
-    ["Flux"]="flux_generate.py black-forest-labs/FLUX.1-dev 28"
+    ["Pixart-alpha"]="pixartalpha_generate.py /root/autodl-fs/PixArt-XL-2-1024-MS 20"
+    ["Flux"]="flux_generate.py /root/autodl-fs/FLUX.1-dev 28"
 )
 
 if [[ -v MODEL_CONFIGS[$MODEL_TYPE] ]]; then

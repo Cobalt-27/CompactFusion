@@ -50,11 +50,11 @@ def main():
         ref_activation_path='ref_activations',
         dump_activations=False,
         calc_total_error=False,
-        low_rank_dim=None,
+        cache_low_rank_dim=None,
         delta_decay_factor=0.3
     )
     compact_init(compact_config)
-    if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
+    if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     torch.distributed.barrier()
 
