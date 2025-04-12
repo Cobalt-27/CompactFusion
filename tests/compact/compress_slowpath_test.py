@@ -88,6 +88,7 @@ def test_1_bit_quantization(
 ):
     # No need to set seed outside the loop if using fork_rng inside
     # torch.manual_seed(seed)
+    RANK = 4 # Define rank to test
     for i in range(LOOP_CNT):
         # Use a slightly different tensor each loop iter if desired, or keep fixed
         loop_seed = seed + i # Ensure different input tensors per loop if needed
@@ -97,12 +98,12 @@ def test_1_bit_quantization(
         # Simulate 1-bit quantization in Python with controlled RNG
         with torch.random.fork_rng(devices=[input_tensor.device]):
             torch.manual_seed(loop_seed) # Reset seed for sim
-            quantized_simulated = sim_binary(input_tensor)
+            quantized_simulated = sim_binary(input_tensor, rank=RANK) # <<< Pass rank
         
         # Perform actual quantization/dequantization with controlled RNG
         with torch.random.fork_rng(devices=[input_tensor.device]):
             torch.manual_seed(loop_seed) # Reset seed for actual quant
-            compressed_tensor, scale_u, scale_v = quantize_1bit(input_tensor)
+            compressed_tensor, scale_u, scale_v = quantize_1bit(input_tensor, rank=RANK) # <<< Pass rank
         
         # Dequantize using the results from the actual quantization
         decompressed_tensor = dequantize_1bit(compressed_tensor, scale_u, scale_v)
@@ -112,7 +113,7 @@ def test_1_bit_quantization(
         assert_tensor_approx(decompressed_tensor, quantized_simulated)
 
 
-from xfuser.compact.main import sim_compress, slowpath_compress, slowpath_decompress
+from xfuser.compact.slowpath import sim_compress, slowpath_compress, slowpath_decompress
 from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
 
 @pytest.mark.parametrize(

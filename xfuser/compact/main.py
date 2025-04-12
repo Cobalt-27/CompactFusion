@@ -10,6 +10,8 @@ from xfuser.prof import Profiler
 from xfuser.compact.stats import stats_log
 import os
 from xfuser.compact.slowpath import slowpath_compress, slowpath_decompress, sim_compress
+from xfuser.compact.patchpara.df_cache import AllGatherCache
+
 """
 COMPACT: Activation Compression with Delta Transmission and Error Feedback
 
@@ -37,21 +39,29 @@ def compact_init(config: CompactConfig):
     # Initialize cache using flags from the provided config
     _cache = CompactCache(
         quantize=config.quantized_cache, 
-        low_rank_dim=config.low_rank_dim
+        low_rank_dim=config.cache_low_rank_dim
     )
     global _step
     _step = None
+    if config.override_with_patch_gather_fwd:
+        global _allgather_cache
+        _allgather_cache = AllGatherCache()
 
 def compact_hello():
     if dist.get_rank() == 0:
         print(f"🐳  Compact initialized")
-        print(f"🟦  Compact enabled" if _config.enable_compress else "🟫  Compact disabled")
-        if _config.enable_compress:
-            print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
-            print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
-            print(f"🟦  Check Consistency" if _config.check_cache_consistency else "🟫  No check consistency")
-            print(f"🟦  Dump Activations" if _config.dump_activations else "🟫  No dump activations")
-            print(f"🟦  Calculate Total Error" if _config.calc_total_error else "🟫  No calculate total error")
+        print(f"🟦  Compact enabled" if _config.enabled else "🟫  Compact disabled")
+        if _config.enabled:
+            if not _config.override_with_patch_gather_fwd:
+                print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
+                print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
+                print(f"🟦  Check consistency" if _config.check_cache_consistency else "🟫  No check consistency")
+                print(f"🟦  Dump activations" if _config.dump_activations else "🟫  No dump activations")
+                print(f"🟦  Calculate total error" if _config.calc_total_error else "🟫  No calculate total error")
+            else:
+                print(f"🟧  Overrided to Patch Para")
+                patch_config = _config.patch_gather_fwd_config
+                print(f"🟨  Using DistriFusion" if patch_config.async_comm else "🟫  Sync patch para")
 
 def compact_config():
     global _config
@@ -69,17 +79,23 @@ def compact_get_step():
 def compact_cache():
     return _cache
 
+def allgather_cache():
+    global _allgather_cache
+    return _allgather_cache
 
 def compact_reset():
     global _cache
     _cache = CompactCache(
         quantize=_config.quantized_cache, 
-        low_rank_dim=_config.low_rank_dim
+        low_rank_dim=_config.cache_low_rank_dim
     )
     from xfuser.compact.stats import stats_clear
     stats_clear()
     global _step
     _step = None
+    if _config.override_with_patch_gather_fwd:
+        global _allgather_cache
+        _allgather_cache = AllGatherCache()
 
 
 @Profiler.prof_func("compact._compress_fn")
@@ -105,7 +121,7 @@ def compact_compress(
     update_cache: bool = False,
 ):
     assert x.is_contiguous()
-    assert _config.enable_compress
+    assert _config.enabled
     original_shape = x.shape
     if len(x.shape) >= 4:
         x = x.view(-1, x.shape[-2] * x.shape[-1])
@@ -121,12 +137,9 @@ def compact_compress(
 
     if compress_type == COMPACT_COMPRESS_TYPE.WARMUP:
         if _config.fastpath:
+            assert _config.compress_residual == 1
             x_t = x.transpose(0, 1)
-            base = _cache.get_base(cache_key)
-            if base is None:
-                cond_cache_put(cache_key, x_t, None)
-            else:
-                cond_cache_put(cache_key, x_t, x_t - base)
+            cond_cache_put(cache_key, x_t, None)
         else:
             if _config.compress_residual == 1:
                 cond_cache_put(cache_key, x, None)
@@ -139,30 +152,36 @@ def compact_compress(
         return x.view(original_shape)
     else:
         if _config.fastpath:
-            assert _config.compress_residual == 2 and compress_type == COMPACT_COMPRESS_TYPE.BINARY
+            assert compress_type == COMPACT_COMPRESS_TYPE.BINARY
+            assert _config.compress_residual == 1
             from xfuser.compact.fastpath import binary_quant_fastpath
             base = _cache.get_base(cache_key)
-            delta_base = _cache.get_delta_base(cache_key)
-            x_t = x.transpose(0, 1)
-            q, scale_u, scale_v, new_base, new_delta_base = binary_quant_fastpath(
-                x_t, base, delta_base, update_cache, delta_decay_factor=_config.delta_decay_factor
+            x_t = x.transpose(0, 1).contiguous()
+            q, scale_u_ck, scale_v_kn, new_base = binary_quant_fastpath(
+                x_tensor_cn=x_t,
+                base_tensor_cn=base,
+                rank=_config.comp_rank,
+                update_cache=update_cache,
             )
             if update_cache:
-                _cache.put(cache_key, new_base, new_delta_base)
-            compressed = torch.cat([
-                q.flatten().view(torch.half),
-                scale_u.flatten(),
-                scale_v.flatten()
-            ])
+                _cache.put(cache_key, new_base, None)
+
+            q_flat_half = q.view(torch.half).flatten()
+            u_flat_half = scale_u_ck.flatten()
+            v_flat_half = scale_v_kn.flatten()
+            compressed = torch.cat([q_flat_half, u_flat_half, v_flat_half], dim=0)
+
             if _config.log_compress_stats:
+                log_base = base.transpose(0, 1) if base is not None else None
+                log_recv_activation = new_base.transpose(0, 1) if new_base is not None else None
                 stats_log().log(
-                    cache_key, 
-                    base.transpose(0, 1), 
-                    delta_base.transpose(0, 1), 
-                    x, # before_comp_activation
-                    new_base.transpose(0, 1), # recv_activation (reconstructed base is logged here for fastpath)
-                    compressed, 
-                    _config.compress_residual,
+                    cache_key,
+                    log_base,
+                    None,
+                    x,
+                    log_recv_activation,
+                    compressed,
+                    1,
                     ref_activation_path=_config.ref_activation_path,
                     dump_activations=_config.dump_activations,
                     calc_total_error=_config.calc_total_error
@@ -218,7 +237,6 @@ def compact_compress(
                     _decay_delta_base(new_delta_base),
                 )
                 if _config.log_compress_stats:
-                    # Pass config paths/flags to log function
                     stats_log().log(
                         cache_key, 
                         base, 
@@ -247,7 +265,7 @@ def compact_decompress(
     shape: tuple,
     update_cache: bool = False,
 ):
-    assert _config.enable_compress
+    assert _config.enabled
     original_shape = shape
     if len(shape) >= 4:
         # TODO: check tensor layout for all_gather
@@ -267,11 +285,8 @@ def compact_decompress(
     if compress_type == COMPACT_COMPRESS_TYPE.WARMUP:
         val = compressed.view(shape)
         if _config.fastpath:
-            base = _cache.get_base(cache_key)
-            if base is None:
-                cond_cache_put(cache_key, val.transpose(0, 1), None)
-            else:
-                cond_cache_put(cache_key, val.transpose(0, 1), val.transpose(0, 1) - base)
+            assert _config.compress_residual == 1
+            cond_cache_put(cache_key, val.transpose(0, 1), None)
         else:
             if _config.compress_residual == 1:
                 cond_cache_put(cache_key, val, None)
@@ -284,29 +299,49 @@ def compact_decompress(
         return val.view(original_shape)
     else:
         if _config.fastpath:
-            assert _config.compress_residual == 2 and compress_type == COMPACT_COMPRESS_TYPE.BINARY
+            assert compress_type == COMPACT_COMPRESS_TYPE.BINARY, "Fastpath only supports BINARY compress type"
+            assert _config.compress_residual == 1
             from xfuser.compact.fastpath import binary_dequant_fastpath
-            numel = torch.prod(torch.tensor(shape, dtype=torch.int64)).item()
-            channel_size = shape[-1]
-            u_size = channel_size
-            v_size = shape[0]
-            assert compressed.numel() == numel // 16 + u_size + v_size, f"Mismatch in compressed tensor size: expected {numel // 16 + u_size + v_size}, got {compressed.numel()}"
-            q = compressed[:numel // 16]
-            scale_u = compressed[numel // 16:numel // 16 + u_size].flatten().contiguous()
-            scale_v = compressed[numel // 16 + u_size: numel // 16 + u_size + v_size].flatten().contiguous()
-            q = q.view(torch.uint8).view(channel_size, -1).contiguous()
 
-            reconstructed, new_delta_base = binary_dequant_fastpath(
-                q,
-                scale_u,
-                scale_v,
-                _cache.get_base(cache_key),
-                _cache.get_delta_base(cache_key),
-                delta_decay_factor=_config.delta_decay_factor,
+            N, C = shape # Original shape (N, C) after reshape
+            rank = _config.comp_rank
+            assert N % 8 == 0
+
+            # Calculate split sizes for packed(uint8), scale_u(C,K), scale_v(K,N)
+            q_numel_uint8 = C * (N // 8)
+            q_numel_half = q_numel_uint8 // 2 # Stored as half
+            u_numel_half = C * rank             # U is (C, K)
+            v_numel_half = rank * N             # V is (K, N)
+
+            expected_numel = q_numel_half + u_numel_half + v_numel_half
+            assert compressed.numel() == expected_numel, \
+                f"Mismatch in compressed tensor size: expected {expected_numel} (q={q_numel_half}, u={u_numel_half}, v={v_numel_half}), got {compressed.numel()}"
+
+            # Split the compressed tensor
+            q_half, scale_u_flat, scale_v_flat = torch.split(
+                compressed,
+                [q_numel_half, u_numel_half, v_numel_half]
+            )
+
+            # Reshape
+            packed_cn8 = q_half.view(torch.uint8).view(C, N // 8)
+            scale_u_ck = scale_u_flat.view(C, rank)
+            scale_v_kn = scale_v_flat.view(rank, N) # <<< Reshape V to (K, N)
+
+            base_cn = _cache.get_base(cache_key)
+
+            # Updated function call signature and return value
+            reconstructed_cn = binary_dequant_fastpath(
+                packed_in_cn8=packed_cn8,
+                scale_u_ck=scale_u_ck,
+                scale_v_kn=scale_v_kn, # <<< Pass V(K, N)
+                base_cn=base_cn,
+                rank=rank,
             )
             if update_cache:
-                _cache.put(cache_key, reconstructed, new_delta_base)
-            reconstructed = reconstructed.transpose(0, 1)
+                # Put None for delta_base as it's L1
+                _cache.put(cache_key, reconstructed_cn, None)
+            reconstructed = reconstructed_cn.transpose(0, 1).contiguous()
         else:
             if _config.compress_residual == 0:
                 reconstructed = _decompress_fn(compressed, compress_type, shape)
@@ -327,3 +362,34 @@ def compact_decompress(
         return reconstructed.view(original_shape)
     raise RuntimeError("should not reach here")
 
+def compact_all_gather(
+    tag,
+    x: torch.Tensor,
+    comp_type: COMPACT_COMPRESS_TYPE,
+    group=None,
+):
+    raise NotImplementedError("Compact all gather is inconsistent with ring impl.")
+    assert _config.enabled
+    rank = dist.get_rank(group)
+    my_key = f"{tag}-{rank}"
+    to_send = compact_compress(
+        my_key,
+        x,
+        comp_type,
+        update_cache=False,
+    )
+    world_size = dist.get_world_size(group)
+    buf_list = [torch.empty_like(to_send) for _ in range(world_size)]
+    with Profiler.scope("compact.all_gather"):
+        dist.all_gather(buf_list, to_send, group=group, async_op=False)
+    decompressed_list = [
+        compact_decompress(
+            f"{tag}-{i}",
+            buf,
+            comp_type,
+            x.shape,
+            update_cache=True,
+        )
+        for i, buf in enumerate(buf_list)
+    ]
+    return decompressed_list

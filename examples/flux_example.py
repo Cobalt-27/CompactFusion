@@ -37,29 +37,40 @@ def main():
     """
     COMPACT
     """
+    from xfuser.compact.patchpara.df_utils import PatchConfig
+    prepared_patch_config = PatchConfig(
+        use_compact=False,
+        async_comm=True,
+        async_warmup=2,
+    )
+    OVERRIDE_WITH_PATCH_PARA = False
+    patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
+    
     from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
     from xfuser.prof import Profiler, prof_summary, set_torch_profiler
     from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.SPARSE
     compact_config = CompactConfig(
         enabled=True,
+        override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
+        patch_gather_fwd_config=patch_config,
         compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=16,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
-        ef=True, 
-        simulate=True,
-        log_stats=True,
+        ef=True,
+        simulate=False,
+        log_stats=False,
         check_consist=False,
         fastpath=False,
         ref_activation_path='ref_activations',
         dump_activations=False,
         calc_total_error=False,
         low_rank_dim=None,
-        delta_decay_factor=0.3
+        delta_decay_factor=0.5
     )
     compact_init(compact_config)
-    if compact_config.enable_compress: # IMPORTANT: Compact should be disabled when using pipefusion
+    if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     torch.distributed.barrier()
 
@@ -90,14 +101,15 @@ def main():
     pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
     
     compact_hello()
-    LOOP_COUNT = 1
+    LOOP_COUNT = 2
 
     for _ in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
+        Profiler.instance().reset()
         with Profiler.instance().scope("total"):
-            Profiler.instance().disable()
+            # Profiler.instance().disable()
             output = pipe(
                 height=input_config.height,
                 width=input_config.width,
@@ -111,7 +123,7 @@ def main():
             end_time = time.time()
             elapsed_time = end_time - start_time
             peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
-            Profiler.instance().enable()
+            # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues
         if local_rank == 0:

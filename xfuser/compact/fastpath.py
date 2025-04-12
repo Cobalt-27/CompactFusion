@@ -4,6 +4,7 @@ import torch
 from xfuser.prof import Profiler
 from xfuser.compact.compress_quantize import dequantize_1bit
 from xfuser.compact.compress_quantize import quantize_1bit
+# from xfuser.compact.compress_quantize import quantize_1bit # Not needed for sim
 # Import subspace iter for rank-1 scale approximation
 from xfuser.compact.compress_lowrank import subspace_iter
 
@@ -17,700 +18,587 @@ def _binary_quant_fastpath(
     # Input Pointers (Layout C, N)
     x_ptr,             # Current activation (C, N)
     base_ptr,          # Cached base (C, N)
-    delta_base_ptr,    # Cached delta_base (C, N)
-    scale_u_ptr,       # Input scale factor u (C,)
-    scale_v_ptr,       # Input scale factor v (N,)
+    scale_u_ptr,       # Input scale factor u (C, K)
+    scale_v_ptr,       # Input scale factor v (K, N)
     # Output Pointers
-    packed_dd_ptr,     # Packed delta_delta (C, N//8) - OUTPUT
+    packed_out_ptr,    # Packed delta (C, N//8) - OUTPUT
     new_base_ptr,      # Output new base (C, N) - optional write
-    new_delta_base_ptr,# Output new delta_base (C, N) - optional write
     # Dimensions
     N_TOKENS: tl.constexpr, # Original N
     CHANNEL: tl.constexpr,  # Original C
     N_TOKENS_8: tl.constexpr, # N_TOKENS // 8
+    RANK: tl.constexpr,      # Rank K for scale approximation
     # Strides (ALL are for C, N layout, except packed and scale)
     stride_xc, stride_xn,
     stride_bc, stride_bn,
-    stride_dbc, stride_dbn,
-    stride_scale_u, # stride for u (C,)
-    stride_scale_v, # stride for v (N,)
+    stride_scale_uc, stride_scale_uk, # Stride for u (C, K)
+    stride_scale_vn, stride_scale_vk, # Stride for v (K, N)
     stride_packed_c, stride_packed_n8, # Strides for packed output (C, N//8)
     stride_newb_c, stride_newb_n,      # Strides for new_base (C, N)
-    stride_newdb_c, stride_newdb_n,    # Strides for new_delta_base (C, N)
     # Meta-parameters
     BLOCK_SIZE_N: tl.constexpr, # Block size for N dimension
     UPDATE_CACHE: tl.constexpr,
-    DELTA_DECAY: tl.constexpr, # Decay factor for delta_base
 ):
     """
-    Optimized kernel quantizing delta_delta using vectorized packing with blocking.
-    Calculates: delta_delta = x - base - delta_base
-    Packs into 1-bit representation using sign. Scale is pre-calculated.
-
-    Inputs: x, base, delta_base (all C, N), scale_u (C,), scale_v (N,)
-    Outputs: packed_dd (C, N//8)
-    Optional: Computes cache updates if UPDATE_CACHE=True
+    Quantizes delta (x - base) to 1-bit.
+    Packs into 1-bit representation using sign. Scale is calculated using rank-K approximation INSIDE kernel.
+    Optionally updates base cache.
     Grid: (CHANNEL, cdiv(N_TOKENS, BLOCK_SIZE_N))
     """
-    # Program IDs
-    pid_c = tl.program_id(0)        # Channel ID
-    pid_n_block = tl.program_id(1)  # Block ID along N dimension
-
-    # Calculate offsets for the current block in N dimension
+    pid_c = tl.program_id(0); pid_n_block = tl.program_id(1)
     n_block_start = pid_n_block * BLOCK_SIZE_N
     offs_n = n_block_start + tl.arange(0, BLOCK_SIZE_N)
-    mask_n = offs_n < N_TOKENS # Mask for N dimension elements
+    mask_n = offs_n < N_TOKENS
 
-    # --- Load Inputs for the current block ---
-    # Pointers for the current channel (row)
+    # --- Load Inputs ---
     x_row_ptr = x_ptr + pid_c * stride_xc
     base_row_ptr = base_ptr + pid_c * stride_bc
-    db_row_ptr = delta_base_ptr + pid_c * stride_dbc
+    x_block = tl.load(x_row_ptr + offs_n * stride_xn, mask=mask_n, other=0.0)
+    base_block = tl.load(base_row_ptr + offs_n * stride_bn, mask=mask_n, other=0.0)
 
-    # Load blocks with masking
-    x_block = tl.load(x_row_ptr + offs_n * stride_xn, mask=mask_n, other=0.0)       # [BLOCK_SIZE_N]
-    base_block = tl.load(base_row_ptr + offs_n * stride_bn, mask=mask_n, other=0.0) # [BLOCK_SIZE_N]
-    db_block = tl.load(db_row_ptr + offs_n * stride_dbn, mask=mask_n, other=0.0)   # [BLOCK_SIZE_N]
+    # --- Calculate Tensor to Quantize (Always delta) ---
+    tensor_to_quantize = x_block - base_block
 
-    # --- Calculate delta_delta and Quantize ---
-    delta_delta_block = x_block - base_block - db_block # [BLOCK_SIZE_N]
-
-    # Calculate Signs, applying mask to ensure 0 for out-of-bounds
-    # (delta_delta_block >= 0) is False (0) for masked elements because they are 0.0
-    binary = (delta_delta_block >= 0).to(tl.uint8) # [BLOCK_SIZE_N]
-
-    # --- Vectorized Packing [BLOCK_SIZE_N] -> [BLOCK_SIZE_N // 8] ---
-    # BLOCK_SIZE_N must be divisible by 8 for this reshape/reduction
-    # Check assertion in host code if needed, 512 % 8 == 0 is true.
-    # BLOCK_SIZE_N_8 = BLOCK_SIZE_N // 8 # Not constexpr for reshape
-    # Use constexpr division directly in reshape
-    binary_reshaped = tl.reshape(binary, (BLOCK_SIZE_N // 8, 8)) # Shape: [constexpr, 8]
-    shifts = tl.arange(0, 8).to(tl.uint8)                     # [8]
-    shifted = (binary_reshaped << shifts).to(tl.uint8)        # Shape: [constexpr, 8]
-    # Reduce along axis 1 (the 8 bits)
-    packed_dd_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8) # Shape: [constexpr]
+    # --- Quantize (Pack Signs) ---
+    binary = (tensor_to_quantize >= 0).to(tl.uint8)
+    binary_reshaped = tl.reshape(binary, (BLOCK_SIZE_N // 8, 8))
+    shifts = tl.arange(0, 8).to(tl.uint8)
+    shifted = (binary_reshaped << shifts).to(tl.uint8)
+    packed_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8)
 
     # --- Store Packed Block ---
-    # Calculate offsets for the packed output dimension
     n8_block_start = n_block_start // 8
     offs_n8 = n8_block_start + tl.arange(0, BLOCK_SIZE_N // 8)
-    mask_n8 = offs_n8 < N_TOKENS_8 # Mask for packed dimension (N//8)
-
-    packed_output_base_ptr = packed_dd_ptr + pid_c * stride_packed_c
+    mask_n8 = offs_n8 < N_TOKENS_8
+    packed_output_base_ptr = packed_out_ptr + pid_c * stride_packed_c
     packed_output_ptrs = packed_output_base_ptr + offs_n8 * stride_packed_n8
-    tl.store(packed_output_ptrs, packed_dd_block, mask=mask_n8)
+    tl.store(packed_output_ptrs, packed_block, mask=mask_n8)
 
-    # --- Update Cache (when enabled) ---
+    # --- Update Cache (Conditional) ---
     if UPDATE_CACHE:
-        # Load scale components: u (scalar for this channel), v (block vector)
-        scale_u_val = tl.load(scale_u_ptr + pid_c * stride_scale_u).to(tl.float16) # Scalar
-        scale_v_block = tl.load(scale_v_ptr + offs_n * stride_scale_v, mask=mask_n, other=0.0).to(tl.float16) # [BLOCK_SIZE_N]
-        
-        # Calculate element-wise scale for the block
-        scale_block = scale_u_val * scale_v_block # [BLOCK_SIZE_N]
+        # --- Load Scale Components (Rank-K) ---
+        offs_k = tl.arange(0, RANK)
+        # Load U vector for current channel pid_c: shape (K,)
+        scale_u_ptr_base = scale_u_ptr + pid_c * stride_scale_uc
+        scale_u_vec = tl.load(scale_u_ptr_base + offs_k * stride_scale_uk) # (K,)
 
-        # Dequantize based on the `binary` block, using the calculated scale
+        # Load V block for current N block: shape (K, BLOCK_SIZE_N) from V (K, N)
+        offs_n_masked = n_block_start + tl.arange(0, BLOCK_SIZE_N)
+        # Correct broadcasting for V offsets: (K, 1) for k_offsets, (1, BLOCK_SIZE_N) for n_offsets
+        # V layout is (K, N), stride_scale_vk = stride K dim, stride_scale_vn = stride N dim
+        offs_v = offs_k[:, None] * stride_scale_vk + offs_n_masked[None, :] * stride_scale_vn # <<< CHANGED Calculation
+        mask_v = mask_n[None, :] & (offs_k[:, None] < RANK) # Shape (K, BLOCK_SIZE_N)
+        scale_v_block = tl.load(scale_v_ptr + offs_v, mask=mask_v, other=0.0) # (K, BLOCK_SIZE_N)
+
+        # --- Calculate Scale (Rank-K dot product) ---
+        # scale = dot(u_k, v_k) -> sum(u_k * v_k)
+        scale_block = tl.sum(scale_u_vec[:, None] * scale_v_block, axis=0).to(tl.float16) # (BLOCK_SIZE_N,)
+
+        # Dequantize based on the `binary` block
         sign_int8 = tl.where(mask_n, (2 * binary.to(tl.int8) - 1), 0)
-        recv_delta_delta_block = sign_int8 * scale_block # Use block-wise scale
+        recv_quantized_block = sign_int8 * scale_block # This is recv_delta
 
-        # Calculate new base and delta_base blocks
-        recon_x_block = base_block + db_block + recv_delta_delta_block         # [BLOCK_SIZE_N]
-        new_delta_base_block = (db_block + recv_delta_delta_block) * DELTA_DECAY # [BLOCK_SIZE_N]
+        # Calculate new base
+        new_base_block = base_block + recv_quantized_block # new_base = base + recv_delta
 
-        # Pointers for output caches for the current channel
+        # Store new base
         new_base_row_ptr = new_base_ptr + pid_c * stride_newb_c
-        new_db_row_ptr = new_delta_base_ptr + pid_c * stride_newdb_c
-
-        # Store new base and delta_base blocks with N mask
-        tl.store(new_base_row_ptr + offs_n * stride_newb_n, recon_x_block, mask=mask_n)
-        tl.store(new_db_row_ptr + offs_n * stride_newdb_n, new_delta_base_block, mask=mask_n)
+        tl.store(new_base_row_ptr + offs_n * stride_newb_n, new_base_block, mask=mask_n)
 
 
 @Profiler.prof_func("compact.binary_quant_fastpath")
 def binary_quant_fastpath(
     x_tensor_cn: torch.Tensor,        # Input (C, N)
     base_tensor_cn: torch.Tensor,     # Input (C, N)
-    delta_base_tensor_cn: torch.Tensor, # Input (C, N)
+    rank: int,                        # Rank K
     update_cache: bool,
-    delta_decay_factor: float,  # Decay factor for delta_base
 ):
     """
-    Quantize delta_delta to 1-bit representation with fast path kernel.
-    Uses blocking along N dimension. Scale is calculated outside kernel.
-
-    Input: x, base, delta_base (C, N)
-    Output: packed_dd (C, N//8), scale_u (C,), scale_v (N,),
-            new_base and new_delta_base if update_cache=True, else None, None, None
+    Quantizes delta (x - base) to 1-bit using fast path kernel.
+    Calculates Rank-K scale factors U(C,K), V(K,N) and passes them to kernel for internal scale calculation.
+    Returns: packed(C, N//8), scale_u(C,K), scale_v(K,N), new_base(C,N)|None
     """
+    # Assertions
+    assert rank >= 1, "Rank must be >= 1"
     assert x_tensor_cn.dtype == torch.half
     assert base_tensor_cn.dtype == torch.half
-    assert delta_base_tensor_cn.dtype == torch.half
-    assert x_tensor_cn.ndim == 2 and base_tensor_cn.ndim == 2 and delta_base_tensor_cn.ndim == 2
-    assert x_tensor_cn.shape == base_tensor_cn.shape == delta_base_tensor_cn.shape
-    assert x_tensor_cn.is_cuda and base_tensor_cn.is_cuda and delta_base_tensor_cn.is_cuda
+    assert x_tensor_cn.ndim == 2 and base_tensor_cn.ndim == 2
+    assert x_tensor_cn.shape == base_tensor_cn.shape
+    assert x_tensor_cn.is_cuda and base_tensor_cn.is_cuda
+
 
     x_tensor_cn = x_tensor_cn.contiguous()
     base_tensor_cn = base_tensor_cn.contiguous()
-    delta_base_tensor_cn = delta_base_tensor_cn.contiguous()
 
     CHANNEL, N_TOKENS = x_tensor_cn.shape
-    # Kernel requires BLOCK_SIZE_N to be divisible by 8 for packing reshape
-    # Also N_TOKENS should ideally be cleanly divisible by 8 if possible, but kernel handles non-divisible N_TOKENS via mask_n
     assert N_TOKENS % 8 == 0, "N_TOKENS must be divisible by 8 for packing output alignment"
     N_TOKENS_8 = N_TOKENS // 8
 
-    # Calculate delta_delta
-    delta_delta_cn = x_tensor_cn - base_tensor_cn - delta_base_tensor_cn
-    
-    # Calculate rank-1 approximation for scale u, v
-    # Use subspace_iter on abs(delta_delta) -> U(C,1), V(1,N), Q(N,1)
-    # NOTE: Using low iterations (e.g., 2) as per simulation code snippet
-    # Adjust iterations if needed. Using rank=1.
-    with Profiler.scope("compact.quant.scale_rank1_approx"):
-        scale_U, scale_V_t, _ = subspace_iter(
-            torch.abs(delta_delta_cn), rank=1, num_iters=2
+    # Calculate tensor to quantize (Always delta)
+    tensor_to_quantize_cn = x_tensor_cn - base_tensor_cn
+
+    # Calculate rank-K approximation for scale based on abs(tensor_to_quantize)
+    # subspace_iter expects (C, N), returns U_ck(C, K), V_t_kn(K, N)
+    with Profiler.scope(f"compact.quant.scale_rank{rank}_approx"):
+        scale_U_ck, scale_V_t_kn, _ = subspace_iter(
+            torch.abs(tensor_to_quantize_cn), rank=rank, num_iters=2
         )
-    # scale_U is (C, 1), scale_V_t is (1, N)
-    scale_u_output = scale_U.squeeze(-1).contiguous().to(torch.half) # Shape (C,)
-    scale_v_output = scale_V_t.squeeze(0).contiguous().to(torch.half) # Shape (N,)
-    assert scale_u_output.shape == (CHANNEL,)
-    assert scale_v_output.shape == (N_TOKENS,)
+    # Kernel expects U(C, K) and V(K, N)
+    scale_u_output_ck = scale_U_ck.contiguous().to(torch.half)       # Shape (C, K)
+    scale_v_output_kn = scale_V_t_kn.contiguous().to(torch.half) # Shape (K, N)
+    assert scale_u_output_ck.shape == (CHANNEL, rank)
+    assert scale_v_output_kn.shape == (rank, N_TOKENS)
 
     # Allocate outputs
-    packed_dd_output = torch.empty((CHANNEL, N_TOKENS_8), dtype=torch.uint8, device=x_tensor_cn.device)
-    # scale_u_output and scale_v_output calculated above
+    packed_output = torch.empty((CHANNEL, N_TOKENS_8), dtype=torch.uint8, device=x_tensor_cn.device)
     new_base_output_cn = torch.empty_like(x_tensor_cn) if update_cache else None
-    new_delta_base_output_cn = torch.empty_like(x_tensor_cn) if update_cache else None
 
-    # Define block size for N dimension - MUST BE DIVISIBLE BY 8
     BLOCK_SIZE_N = 512
     assert BLOCK_SIZE_N % 8 == 0, "BLOCK_SIZE_N must be divisible by 8"
-    # Calculate 2D grid
     grid = (CHANNEL, triton.cdiv(N_TOKENS, BLOCK_SIZE_N))
-    # print(f"grid: {grid}") # Debug print
-    # print(f'N_TOKENS: {N_TOKENS}, CHANNEL: {CHANNEL}, N_TOKENS_8: {N_TOKENS_8}, BLOCK_SIZE_N: {BLOCK_SIZE_N}') # Debug print
 
-    # Prepare dummy pointers/strides if cache is not updated, kernel expects non-None
-    dummy_tensor = x_tensor_cn # Use an existing tensor for placeholder properties
+    # Prepare dummy pointers/strides if not used
+    dummy_tensor = x_tensor_cn # Use existing tensor for properties
+
+    # New base pointers/strides (dummy if not update_cache)
     new_base_ptr = new_base_output_cn if update_cache else dummy_tensor
-    new_delta_base_ptr = new_delta_base_output_cn if update_cache else dummy_tensor
     stride_newb_c = new_base_ptr.stride(0) if update_cache else 0
     stride_newb_n = new_base_ptr.stride(1) if update_cache else 0
-    stride_newdb_c = new_delta_base_ptr.stride(0) if update_cache else 0
-    stride_newdb_n = new_delta_base_ptr.stride(1) if update_cache else 0
 
 
     with Profiler.scope("compact._binary_quant_fastpath"):
          _binary_quant_fastpath[grid](
-             x_tensor_cn, base_tensor_cn, delta_base_tensor_cn, # Inputs (C, N)
-             scale_u_output, scale_v_output,              # Input scale (C,)
-             packed_dd_output,             # Output packed (C, N//8)
-             new_base_ptr,                 # Output new_base (C, N) or dummy
-             new_delta_base_ptr,           # Output new_delta_base (C, N) or dummy
-             # --- Dimensions ---
-             N_TOKENS, CHANNEL, N_TOKENS_8,
+             x_tensor_cn, base_tensor_cn,
+             scale_u_output_ck, scale_v_output_kn,
+             packed_output,
+             new_base_ptr,
+             # --- Dimensions (Passed as constexpr) ---
+             N_TOKENS=N_TOKENS, CHANNEL=CHANNEL, N_TOKENS_8=N_TOKENS_8,
+             RANK=rank,
              # --- Strides ---
-             # Inputs
-             x_tensor_cn.stride(0), x_tensor_cn.stride(1),
-             base_tensor_cn.stride(0), base_tensor_cn.stride(1),
-             delta_base_tensor_cn.stride(0), delta_base_tensor_cn.stride(1),
-             # Strides for scale u and v
-             scale_u_output.stride(0), # Stride for u (C,)
-             scale_v_output.stride(0), # Stride for v (N,) - assume contiguous
-             packed_dd_output.stride(0), packed_dd_output.stride(1),
-             stride_newb_c, stride_newb_n,
-             stride_newdb_c, stride_newdb_n,
-             # --- Meta-parameters ---
-             BLOCK_SIZE_N=BLOCK_SIZE_N, # Pass block size
+             stride_xc=x_tensor_cn.stride(0), stride_xn=x_tensor_cn.stride(1),
+             stride_bc=base_tensor_cn.stride(0), stride_bn=base_tensor_cn.stride(1),
+             stride_scale_uc=scale_u_output_ck.stride(0), stride_scale_uk=scale_u_output_ck.stride(1),
+             stride_scale_vk=scale_v_output_kn.stride(0), stride_scale_vn=scale_v_output_kn.stride(1),
+             stride_packed_c=packed_output.stride(0), stride_packed_n8=packed_output.stride(1),
+             stride_newb_c=stride_newb_c, stride_newb_n=stride_newb_n,
+             # --- Meta-parameters (Passed as constexpr) ---
+             BLOCK_SIZE_N=BLOCK_SIZE_N,
              UPDATE_CACHE=update_cache,
-             DELTA_DECAY=float(delta_decay_factor),
          )
 
+    # Return values based on update_cache flag
     if update_cache:
-        return packed_dd_output, scale_u_output, scale_v_output, new_base_output_cn, new_delta_base_output_cn
+        # Return 4 values: packed, u, v, new_base
+        return packed_output, scale_u_output_ck, scale_v_output_kn, new_base_output_cn
     else:
-        return packed_dd_output, scale_u_output, scale_v_output, None, None
+        # Always return 4 values, but last one is None if not update_cache
+        return packed_output, scale_u_output_ck, scale_v_output_kn, None
 
-# Implement simulation function for quantize fastpath
+# Simulation uses slowpath quant/dequant
 def sim_binary_quant_fastpath(
     x_tensor_cn: torch.Tensor,        # Input (C, N)
     base_tensor_cn: torch.Tensor,     # Input (C, N)
-    delta_base_tensor_cn: torch.Tensor, # Input (C, N)
+    rank: int,
     update_cache: bool,
-    delta_decay_factor: float,
 ):
     """
-    Simulated version of binary_quant_fastpath using quantize_1bit and dequantize_1bit.
+    Simulated version of binary_quant_fastpath using slowpath quantize_1bit and dequantize_1bit.
+    Handles only RESIDUAL LEVEL 1.
+    Calculates scales U(C,K), V(K,N) exactly once to match fastpath wrapper's calculation and return signature.
+    Uses these calculated scales (transposed) for the internal dequantization simulation if update_cache=True.
+    Returns: packed(C, N//8), scale_u(C,K), scale_v(K,N), new_base(C,N)|None
     """
-    # Ensure inputs are FP16 and 2D
-    assert x_tensor_cn.dtype == torch.float16
-    assert base_tensor_cn.dtype == torch.float16
-    assert delta_base_tensor_cn.dtype == torch.float16
-    assert x_tensor_cn.dim() == 2
-    assert base_tensor_cn.dim() == 2
-    assert delta_base_tensor_cn.dim() == 2
-    assert x_tensor_cn.shape == base_tensor_cn.shape == delta_base_tensor_cn.shape
+    assert rank >= 1, "Rank must be >= 1"
+
     C, N = x_tensor_cn.shape
-
-    # Calculate delta_delta (C, N)
-    delta_delta_cn = x_tensor_cn - base_tensor_cn - delta_base_tensor_cn
-    
-    # Transpose delta_delta to (N, C) for quantize_1bit
-    delta_delta_nc = delta_delta_cn.transpose(0, 1).contiguous()
-    
-    # Quantize using the function (Input: N, C -> Output: packed(C, N//8), u(N,), v(C,))
-    # quantize_1bit requires FP16 input
-    packed_dd_sim, v_n, u_c = quantize_1bit(delta_delta_nc.to(torch.float16))
-
     new_base_cn = None
-    new_delta_base_cn = None
+
+    # Calculate tensor to quantize (Always delta)
+    tensor_to_quantize_cn = x_tensor_cn - base_tensor_cn
+
+    # --- Calculate Scales U(C,K), V(K,N) ONCE --- Mimics fastpath wrapper
+    with Profiler.scope(f"compact.sim_quant.scale_rank{rank}_approx"):
+        scale_U_ck_sim, scale_V_t_kn_sim, _ = subspace_iter(
+            torch.abs(tensor_to_quantize_cn), rank=rank, num_iters=2
+        )
+    # These are the scales returned, matching the fastpath signature
+    scale_u_output_ck_sim = scale_U_ck_sim.contiguous().to(torch.half)       # Shape (C, K)
+    scale_v_output_kn_sim = scale_V_t_kn_sim.contiguous().to(torch.half) # Shape (K, N)
+
+    # --- Perform Quantization using slowpath quantize_1bit (ONLY for packed_sim) ---
+    # We ignore the scales returned by slowpath quantize_1bit
+    tensor_to_quantize_nc = tensor_to_quantize_cn.transpose(0, 1).contiguous()
+    packed_sim, _, _ = quantize_1bit(tensor_to_quantize_nc.to(torch.float16), rank=rank)
+
     if update_cache:
-        # Dequantize using the function (Input: packed(C, N//8), u(N,), v(C,) -> Output: (N, C))
-        # Note: quantize_1bit outputs correct shapes for dequantize_1bit
-        recv_delta_delta_nc = dequantize_1bit(packed_dd_sim, v_n, u_c)
-        
-        # Transpose back to (C, N)
-        recv_delta_delta_cn = recv_delta_delta_nc.transpose(0, 1).contiguous()
+        # --- Perform Dequantization using slowpath dequantize_1bit ---
+        # Prepare scales for slowpath dequantize_1bit: u_nk, v_kc
+        # Use the scales calculated above (identically to the fastpath wrapper)
+        # We have U(C,K) and V(K,N). Slowpath needs U(N,K) and V(K,C).
+        # u_nk_slowpath = V.T, v_kc_slowpath = U.T
+        u_nk_for_slowpath = scale_v_output_kn_sim.transpose(0, 1).contiguous() # Shape (N, K)
+        v_kc_for_slowpath = scale_u_output_ck_sim.transpose(0, 1).contiguous() # Shape (K, C)
 
-        # Ensure calculations are done in FP16
-        recv_delta_delta_cn = recv_delta_delta_cn.to(torch.float16)
+        recv_quantized_nc = dequantize_1bit(packed_sim, u_nk_for_slowpath, v_kc_for_slowpath)
+        recv_quantized_cn = recv_quantized_nc.transpose(0, 1).contiguous().to(torch.float16)
 
-        # Calculate new caches
-        new_base_cn = base_tensor_cn + delta_base_tensor_cn + recv_delta_delta_cn
-        new_delta_base_cn = (delta_base_tensor_cn + recv_delta_delta_cn) * delta_decay_factor
+        # Calculate new base (Always level 1)
+        new_base_cn = base_tensor_cn + recv_quantized_cn
 
-    # Ensure outputs match expected types if calculated
-    if new_base_cn is not None: assert new_base_cn.dtype == torch.float16
-    if new_delta_base_cn is not None: assert new_delta_base_cn.dtype == torch.float16
-    assert packed_dd_sim.dtype == torch.uint8
-    assert v_n.dtype == torch.float16 and v_n.shape == (N,)
-    assert u_c.dtype == torch.float16 and u_c.shape == (C,)
+    # Return values matching fastpath signature: packed, scale_u(C,K), scale_v(K,N), new_base
+    return packed_sim, scale_u_output_ck_sim, scale_v_output_kn_sim, new_base_cn
 
-    return packed_dd_sim, u_c, v_n, new_base_cn, new_delta_base_cn
-
-# --- Fused Dequantization + Reconstruction + New Delta Base Calculation (C, N Layout) ---
 
 @triton.jit
 def _binary_dequant_fastpath(
     # Input Pointers
-    packed_dd_ptr,     # Packed delta_delta (C, N//8) uint8
-    scale_u_ptr,       # Scale factor u (C,)
-    scale_v_ptr,       # Scale factor v (N,)
+    packed_in_ptr,     # Packed delta (C, N//8) uint8
+    scale_u_ptr,       # Scale factor u (C, K)
+    scale_v_ptr,       # Scale factor v (K, N)
     base_ptr,          # Base cache (C, N) half
-    delta_base_ptr,    # Delta base cache (C, N) half
     # Output Pointers
     recon_ptr,         # Output reconstructed activation (C, N) half
-    new_db_ptr,        # Output new delta_base (C, N) half
     # Dimensions
     N_TOKENS: tl.constexpr, # Original N
     CHANNEL: tl.constexpr,  # Original C
     N_TOKENS_8: tl.constexpr, # N_TOKENS // 8
-    # Strides (ALL are for C, N layout, except packed)
+    RANK: tl.constexpr,
+    # Strides
     stride_packed_c, stride_packed_n8,
-    stride_scale_u,
-    stride_scale_v,
+    stride_scale_uc, stride_scale_uk,
+    stride_scale_vk, stride_scale_vn,
     stride_base_c, stride_base_n,
-    stride_db_c, stride_db_n,
     stride_recon_c, stride_recon_n,
-    stride_newdb_c, stride_newdb_n,
     # Meta-parameters
     BLOCK_SIZE_N: tl.constexpr, # Block size for N dimension
-    DELTA_DECAY: tl.constexpr, # Decay factor for delta_base
 ):
     """
-    Optimized dequantization kernel with blocking along N.
-    Calculates:
-      - recv_delta_delta = dequantize(packed_dd, scale_dd)
-      - reconstructed = base + delta_base + recv_delta_delta
-      - new_delta_base = (delta_base + recv_delta_delta) * DELTA_DECAY
-
-    Inputs: packed_dd (C, N//8), scale_dd (C,), base/delta_base (C, N)
-    Outputs: reconstructed (C, N), new_delta_base (C, N)
+    Dequantizes delta and calculates reconstructed activation (base + recv_delta) using rank-K scale calculated INSIDE kernel.
     Grid: (CHANNEL, cdiv(N_TOKENS, BLOCK_SIZE_N))
     """
-    # Program IDs
-    pid_c = tl.program_id(0)        # Channel ID
-    pid_n_block = tl.program_id(1)  # Block ID along N dimension
-
-    # Calculate offsets for the current block in N dimension
+    pid_c = tl.program_id(0); pid_n_block = tl.program_id(1)
     n_block_start = pid_n_block * BLOCK_SIZE_N
     offs_n = n_block_start + tl.arange(0, BLOCK_SIZE_N)
-    mask_n = offs_n < N_TOKENS # Mask for N dimension elements
+    mask_n = offs_n < N_TOKENS
 
     # --- Dequantize Block ---
-    # Load Scale components u (scalar), v (vector block)
-    scale_u = tl.load(scale_u_ptr + pid_c * stride_scale_u).to(tl.float16)
-    scale_v_block = tl.load(scale_v_ptr + offs_n * stride_scale_v, mask=mask_n, other=0.0).to(tl.float16)
-    # Calculate element-wise scale
-    scale_block = scale_u * scale_v_block # [BLOCK_SIZE_N]
+    # --- Load Scale Components (Rank-K) ---
+    offs_k = tl.arange(0, RANK)
+    # Load U vector for current channel pid_c: shape (K,)
+    scale_u_ptr_base = scale_u_ptr + pid_c * stride_scale_uc
+    scale_u_vec = tl.load(scale_u_ptr_base + offs_k * stride_scale_uk) # (K,)
 
-    # Calculate offsets and mask for the packed input dimension (N//8)
-    # corresponding to the current block in N
-    # BLOCK_SIZE_N_8 = BLOCK_SIZE_N // 8 # Not constexpr for arange
+    # Load V block for current N block: shape (K, BLOCK_SIZE_N) from V (K, N)
+    offs_n_masked = n_block_start + tl.arange(0, BLOCK_SIZE_N)
+    # Correct broadcasting for V offsets: (K, 1) for k_offsets, (1, BLOCK_SIZE_N) for n_offsets
+    # V layout is (K, N), stride_scale_vk = stride K dim, stride_scale_vn = stride N dim
+    offs_v = offs_k[:, None] * stride_scale_vk + offs_n_masked[None, :] * stride_scale_vn # <<< CHANGED Calculation
+    mask_v = mask_n[None, :] & (offs_k[:, None] < RANK) # Shape (K, BLOCK_SIZE_N)
+    scale_v_block = tl.load(scale_v_ptr + offs_v, mask=mask_v, other=0.0) # (K, BLOCK_SIZE_N)
+
+    # --- Calculate Scale (Rank-K dot product) ---
+    scale_block = tl.sum(scale_u_vec[:, None] * scale_v_block, axis=0).to(tl.float16) # (BLOCK_SIZE_N,)
+
+    # Load and unpack bits
     n8_block_start = n_block_start // 8
     offs_n8 = n8_block_start + tl.arange(0, BLOCK_SIZE_N // 8)
     mask_n8 = offs_n8 < N_TOKENS_8
-
-    # Load packed data block [BLOCK_SIZE_N // 8]
-    packed_row_ptr = packed_dd_ptr + pid_c * stride_packed_c
-    packed_block = tl.load(packed_row_ptr + offs_n8 * stride_packed_n8, mask=mask_n8, other=0)
-
-    # Unpack bits: This is the tricky part with blocking.
-    # We need to get [BLOCK_SIZE_N] bits from [BLOCK_SIZE_N_8] bytes.
-    # Map each offset in offs_n to its corresponding byte and bit position.
+    packed_row_ptr = packed_in_ptr + pid_c * stride_packed_c
+    # Corrected unpacking: Load bytes corresponding to offs_n, then extract bits
     byte_indices_in_row = offs_n // 8
     bit_indices_in_byte = offs_n % 8
-
-    # We need to load the relevant bytes for all elements in the offs_n block.
-    # Since offs_n can span multiple packed blocks, we load directly using byte_indices_in_row.
-    # Need to handle potential out-of-bounds access for byte_indices_in_row if offs_n goes beyond N_TOKENS
-    mask_bytes = byte_indices_in_row < N_TOKENS_8
-    # Combine with original mask_n to ensure we only care about valid element positions
-    final_byte_mask = mask_n & mask_bytes
-
-    # Load the bytes corresponding to each element in the current N block
-    packed_bytes_for_elems = tl.load(
-        packed_row_ptr + byte_indices_in_row * stride_packed_n8,
-        mask=final_byte_mask,
-        other=0 # Load 0 for out-of-bounds bytes
-    ) # Shape: [BLOCK_SIZE_N]
-
-    # Extract the correct bit for each element
-    bits = ((packed_bytes_for_elems >> bit_indices_in_byte) & 1) # Shape: [BLOCK_SIZE_N]
-
-    # Dequantize using the extracted bits and calculated scale_block
+    final_byte_mask = mask_n & (byte_indices_in_row < N_TOKENS_8) # Mask for valid bytes within N
+    packed_bytes_for_elems = tl.load(packed_row_ptr + byte_indices_in_row * stride_packed_n8, mask=final_byte_mask, other=0)
+    bits = ((packed_bytes_for_elems >> bit_indices_in_byte) & 1)
     signs = tl.where(mask_n, (2 * bits - 1).to(tl.int8), 0)
-    recv_delta_delta_block = signs * scale_block # Use block-wise scale
+    recv_quantized_block = signs * scale_block # This is recv_delta
 
-    # --- Load Base and Delta Base Block ---
+    # --- Load Base ---
     base_row_ptr = base_ptr + pid_c * stride_base_c
-    db_row_ptr = delta_base_ptr + pid_c * stride_db_c
-    base_block = tl.load(base_row_ptr + offs_n * stride_base_n, mask=mask_n, other=0.0) # [BLOCK_SIZE_N]
-    db_block = tl.load(db_row_ptr + offs_n * stride_db_n, mask=mask_n, other=0.0)     # [BLOCK_SIZE_N]
+    base_block = tl.load(base_row_ptr + offs_n * stride_base_n, mask=mask_n, other=0.0)
 
-    # --- Calculate Outputs Block ---
-    recon_block = base_block + db_block + recv_delta_delta_block # [BLOCK_SIZE_N]
-    new_db_block = (db_block + recv_delta_delta_block) * DELTA_DECAY # [BLOCK_SIZE_N]
+    # --- Calculate Output Block (Always level 1) ---
+    recon_block = base_block + recv_quantized_block # recon = base + recv_delta
 
-    # --- Store Outputs Block ---
+    # --- Store Output Block ---
     recon_out_ptr = recon_ptr + pid_c * stride_recon_c
-    new_db_out_ptr = new_db_ptr + pid_c * stride_newdb_c
     tl.store(recon_out_ptr + offs_n * stride_recon_n, recon_block, mask=mask_n)
-    tl.store(new_db_out_ptr + offs_n * stride_newdb_n, new_db_block, mask=mask_n)
 
 
 @Profiler.prof_func("compact.binary_dequant_fastpath")
 def binary_dequant_fastpath(
-    packed_dd_cn8: torch.Tensor,     # Input (C, N//8) uint8
-    scale_u_c: torch.Tensor,       # Added scale u (C,)
-    scale_v_n: torch.Tensor,       # Added scale v (N,)
-    base_cn: torch.Tensor,         # Input (C, N) half
-    delta_base_cn: torch.Tensor, # Input (C, N) half
-    delta_decay_factor: float,  # Decay factor for delta_base
+    packed_in_cn8: torch.Tensor,    # Input packed delta (C, N//8) uint8
+    scale_u_ck: torch.Tensor,       # Input scale u (C, K)
+    scale_v_kn: torch.Tensor,       # Input scale v (K, N)
+    base_cn: torch.Tensor,         # Input base cache (C, N) half
+    rank: int,
 ):
     """
-    Dequantize 1-bit values and calculate reconstructed output and new_delta_base 
-    using a Triton kernel with blocking along the N dimension.
-    
-    Input: packed_dd (C, N//8), scale_dd (C,), base/delta_base (C, N)
-    Output: reconstructed (C, N), new_delta_base (C, N)
+    Dequantizes delta and calculates reconstructed activation (base + recv_delta) using rank-K scales.
+    Scale calculation (U @ V) happens INSIDE the kernel.
+
+    Input: packed(C, N//8), u(C,K), v(K,N), base(C,N), rank
+    Output: reconstructed(C, N)
     """
-    assert scale_v_n.dtype == torch.half # Check scale v
+    # Assertions
+    assert rank >= 1, "Rank must be >= 1"
+    assert packed_in_cn8.dtype == torch.uint8
+    assert scale_u_ck.dtype == torch.half and scale_v_kn.dtype == torch.half
     assert base_cn.dtype == torch.half
-    assert delta_base_cn.dtype == torch.half
-    assert packed_dd_cn8.ndim == 2 and scale_u_c.ndim == 1 and scale_v_n.ndim == 1 and base_cn.ndim == 2 and delta_base_cn.ndim == 2
-    # Shape check needs adjustment: scale_v_n is (N,) not (C,)
-    # Check Channel dim (C)
-    assert packed_dd_cn8.shape[0] == scale_u_c.shape[0] == base_cn.shape[0] == delta_base_cn.shape[0]
-    # Check Token dim (N)
-    C = scale_u_c.shape[0] # Get C from scale_u_c
-    N = scale_v_n.shape[0] # Get N from scale_v_n
-    assert packed_dd_cn8.shape[1] * 8 == N
-    assert base_cn.shape[1] == N
-    assert delta_base_cn.shape[1] == N
-    assert packed_dd_cn8.is_cuda and scale_u_c.is_cuda and scale_v_n.is_cuda and base_cn.is_cuda and delta_base_cn.is_cuda
+    assert packed_in_cn8.ndim == 2 and scale_u_ck.ndim == 2 and scale_v_kn.ndim == 2 and base_cn.ndim == 2
 
-    packed_dd_cn8 = packed_dd_cn8.contiguous()
-    scale_u_c = scale_u_c.contiguous()
-    scale_v_n = scale_v_n.contiguous()
+    assert packed_in_cn8.is_cuda and scale_u_ck.is_cuda and scale_v_kn.is_cuda and base_cn.is_cuda
+
+    packed_in_cn8 = packed_in_cn8.contiguous()
+    scale_u_ck = scale_u_ck.contiguous()
+    scale_v_kn = scale_v_kn.contiguous()
     base_cn = base_cn.contiguous()
-    delta_base_cn = delta_base_cn.contiguous()
 
-    CHANNEL, N_TOKENS_8 = packed_dd_cn8.shape
+    CHANNEL, N_TOKENS_8 = packed_in_cn8.shape
     N_TOKENS = N_TOKENS_8 * 8
-    assert base_cn.shape == (CHANNEL, N_TOKENS)
-    assert scale_u_c.shape == (CHANNEL,)
-    assert scale_v_n.shape == (N_TOKENS,)
+    assert base_cn.shape == (CHANNEL, N_TOKENS), f"Base shape mismatch: {base_cn.shape} vs expected {(CHANNEL, N_TOKENS)}"
+    assert scale_u_ck.shape == (CHANNEL, rank), f"Scale U shape mismatch: {scale_u_ck.shape} vs expected {(CHANNEL, rank)}"
+    assert scale_v_kn.shape == (rank, N_TOKENS), f"Scale V shape mismatch: {scale_v_kn.shape} vs expected {(rank, N_TOKENS)}"
 
     # Allocate output tensors
     reconstructed_output_cn = torch.empty_like(base_cn)
-    new_delta_base_output_cn = torch.empty_like(delta_base_cn)
 
     BLOCK_SIZE_N = 512
     assert BLOCK_SIZE_N % 8 == 0, "BLOCK_SIZE_N must be divisible by 8 for unpacking logic"
-    # Calculate 2D grid
     grid = (CHANNEL, triton.cdiv(N_TOKENS, BLOCK_SIZE_N))
 
-    with Profiler.scope("compact._binary_dequant_fastpath"):
-         _binary_dequant_fastpath[grid](
-             packed_dd_cn8, 
-             scale_u_c, scale_v_n, # Pass u and v
-             base_cn, delta_base_cn,
-             reconstructed_output_cn, new_delta_base_output_cn,
-             N_TOKENS, CHANNEL, N_TOKENS_8,
-             packed_dd_cn8.stride(0), packed_dd_cn8.stride(1),
-             scale_u_c.stride(0),
-             scale_v_n.stride(0),
-             base_cn.stride(0), base_cn.stride(1),
-             delta_base_cn.stride(0), delta_base_cn.stride(1),
-             reconstructed_output_cn.stride(0), reconstructed_output_cn.stride(1),
-             new_delta_base_output_cn.stride(0), new_delta_base_output_cn.stride(1),
-             BLOCK_SIZE_N=BLOCK_SIZE_N,
-             DELTA_DECAY=float(delta_decay_factor),
-         )
+    # Prepare dummy pointers/strides if not used
+    dummy_tensor = base_cn # Use existing tensor for properties
 
-    return reconstructed_output_cn, new_delta_base_output_cn
+    # with Profiler.scope("compact._binary_dequant_fastpath"):
+    _binary_dequant_fastpath[grid](
+        packed_in_cn8,
+        scale_u_ck, scale_v_kn,
+        base_cn,
+        reconstructed_output_cn,
+        # --- Dimensions (Passed as constexpr) ---
+        N_TOKENS=N_TOKENS, CHANNEL=CHANNEL, N_TOKENS_8=N_TOKENS_8,
+        RANK=rank,
+        # --- Strides ---
+        stride_packed_c=packed_in_cn8.stride(0), stride_packed_n8=packed_in_cn8.stride(1),
+        stride_scale_uc=scale_u_ck.stride(0), stride_scale_uk=scale_u_ck.stride(1),
+        stride_scale_vk=scale_v_kn.stride(0), stride_scale_vn=scale_v_kn.stride(1),
+        stride_base_c=base_cn.stride(0), stride_base_n=base_cn.stride(1),
+        stride_recon_c=reconstructed_output_cn.stride(0), stride_recon_n=reconstructed_output_cn.stride(1),
+        # --- Meta-parameters (Passed as constexpr) ---
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
 
-# Implement simulation function for dequantize fastpath
+    # Return only recon
+    return reconstructed_output_cn
+
+# Simulation uses slowpath quant/dequant
 def sim_binary_dequant_fastpath(
-    packed_dd_cn8: torch.Tensor, # Packed bits (C, N//8) UINT8
-    scale_u_c: torch.Tensor,     # Scale factor U (C,) FP16 - EXPECTED
-    scale_v_n: torch.Tensor,     # Scale factor V (N,) FP16 - EXPECTED
+    packed_in_cn8: torch.Tensor, # Packed bits (C, N//8) UINT8
+    scale_u_ck: torch.Tensor,     # Scale factor U (C, K)
+    scale_v_kn: torch.Tensor,     # Scale factor V (K, N)
     base_cn: torch.Tensor,
-    delta_base_cn: torch.Tensor,
-    delta_decay_factor: float,
+    rank: int,
 ):
     """
-    Simulated version of binary_dequant_fastpath using dequantize_1bit.
-    Accepts scales u(C), v(N) consistent with kernel path signature.
-    Internally swaps scales when calling dequantize_1bit.
+    Simulated version of binary_dequant_fastpath using slowpath dequantize_1bit.
+    Accepts scales u(C,K), v(K,N) consistent with kernel path signature.
+    Transforms scales to u(N,K), v(K,C) expected by slowpath dequantize_1bit.
+    Handles only RESIDUAL LEVEL 1.
+    Returns: reconstructed(C,N)
     """
-    # Ensure inputs have correct types and dimensions (expecting u(C), v(N))
-    assert packed_dd_cn8.dtype == torch.uint8
-    assert scale_u_c.dtype == torch.float16 # C
-    assert scale_v_n.dtype == torch.float16 # N
-    assert base_cn.dtype == torch.float16
-    assert delta_base_cn.dtype == torch.float16
-    assert packed_dd_cn8.dim() == 2
-    assert scale_u_c.dim() == 1 # C
-    assert scale_v_n.dim() == 1 # N
-    assert base_cn.dim() == 2
-    assert delta_base_cn.dim() == 2
-    C = scale_u_c.shape[0]
-    N = scale_v_n.shape[0]
-    assert packed_dd_cn8.shape == (C, N // 8)
-    assert base_cn.shape == (C, N)
-    assert delta_base_cn.shape == (C, N)
+    assert rank >= 1, "Rank must be >= 1"
+
+    C = scale_u_ck.shape[0]
+    N = scale_v_kn.shape[1]
+    assert packed_in_cn8.shape == (C, N // 8)
+    assert scale_u_ck.shape == (C, rank)
+    assert scale_v_kn.shape == (rank, N)
+
+    # --- Perform Dequantization using slowpath dequantize_1bit ---
+    # slowpath expects u(N,K) and v(K,C).
+    # We have u(C,K) and v(K,N) from fastpath.
+    # Map: u_nk_slowpath = scale_v_kn.T, v_kc_slowpath = scale_u_ck.T
+    u_nk_for_slowpath = scale_v_kn.transpose(0, 1).contiguous() # Shape (N, K)
+    v_kc_for_slowpath = scale_u_ck.transpose(0, 1).contiguous() # Shape (K, C)
+
+    recv_quantized_nc = dequantize_1bit(packed_in_cn8, u_nk_for_slowpath, v_kc_for_slowpath)
+    recv_quantized_cn = recv_quantized_nc.transpose(0, 1).contiguous().to(torch.float16)
+
+    reconstructed_cn = None
+
+    # Calculate reconstructed activation (Level 1)
+    reconstructed_cn = base_cn + recv_quantized_cn
+
+    # Return only reconstructed
+    return reconstructed_cn
 
 
-    # Dequantize using the function (Input: packed(C, N//8), u(N,), v(C,) -> Output: (N, C))
-    # Need to PASS v(N) as u_n and u(C) as v_c to match dequantize_1bit signature.
-    recv_delta_delta_nc = dequantize_1bit(packed_dd_cn8, scale_v_n, scale_u_c)
-    
-    # Transpose back to (C, N)
-    recv_delta_delta_cn = recv_delta_delta_nc.transpose(0, 1).contiguous()
-    
-    # Ensure calculations are done in FP16
-    recv_delta_delta_cn = recv_delta_delta_cn.to(torch.float16)
-    
-    # Calculate final outputs
-    reconstructed_cn = base_cn + delta_base_cn + recv_delta_delta_cn
-    new_delta_base_cn = (delta_base_cn + recv_delta_delta_cn) * delta_decay_factor
-
-    # Ensure outputs are FP16
-    assert reconstructed_cn.dtype == torch.float16
-    assert new_delta_base_cn.dtype == torch.float16
-    
-    return reconstructed_cn, new_delta_base_cn
-
-
-# Update Test Function
+# --- Test Functions ---
 def profile_quantize_kernels(num_runs=1000, num_warmup=5):
-    """Profile kernel assuming C,N inputs/outputs."""
-    import time # Ensure time is imported
-    # Setup
+    """Profile quantize kernel."""
+    import time
     N_TOKENS, CHANNEL = 4096, 2048
-    DELTA_DECAY_FACTOR = 0.5
-    
+    atol, rtol = 1e-3, 1e-2
+    RANK_TO_TEST = 4 # <<< Set Rank for testing
+
+    print("--- Quant Performance & Correctness --- (ms per run)")
+
+    print(f"\nTesting Rank: {RANK_TO_TEST}")
+    # Setup Tensors
     x_tensor_cn = (torch.randn((CHANNEL, N_TOKENS), dtype=torch.half, device="cuda") * 0.5).contiguous()
     base_tensor_cn = (torch.randn_like(x_tensor_cn) * 0.1).contiguous()
-    delta_base_tensor_cn = (torch.randn_like(x_tensor_cn) * 0.05).contiguous()
 
-    # --- Calculate Reference Values (using simulation function) --- 
+    # Sim args (simplified)
+    sim_args = (x_tensor_cn, base_tensor_cn, RANK_TO_TEST, True)
+
+    # --- Calculate Reference Values (Simulation) ---
     with torch.random.fork_rng(devices=['cuda']):
-        torch.manual_seed(42) 
-        # Simulation now returns packed, scale_u(C), scale_v(N), ... matching kernel
-        ref_packed_dd, ref_scale_u_c, ref_scale_v_n, ref_new_base_cn, ref_new_delta_base_cn = sim_binary_quant_fastpath(
-            x_tensor_cn, base_tensor_cn, delta_base_tensor_cn,
-            update_cache=True, delta_decay_factor=DELTA_DECAY_FACTOR
-        )
+        torch.manual_seed(42)
+        # Sim function returns 4 values now
+        ref_packed, ref_scale_u, ref_scale_v_kn, ref_new_base = sim_binary_quant_fastpath(*sim_args)
 
-    # --- Warm-up runs --- 
-    print(f"Running {num_warmup} warmup iterations...")
+    # --- Warm-up runs ---
     for _ in range(num_warmup):
         with torch.random.fork_rng(devices=['cuda']):
              torch.manual_seed(42)
-             _ = binary_quant_fastpath(x_tensor_cn, base_tensor_cn, delta_base_tensor_cn, update_cache=True, delta_decay_factor=DELTA_DECAY_FACTOR)
-             _ = sim_binary_quant_fastpath(x_tensor_cn, base_tensor_cn, delta_base_tensor_cn, update_cache=True, delta_decay_factor=DELTA_DECAY_FACTOR)
+             _ = binary_quant_fastpath(
+                 x_tensor_cn, base_tensor_cn,
+                 rank=RANK_TO_TEST,
+                 update_cache=True,
+             )
+             _ = sim_binary_quant_fastpath(*sim_args)
         torch.cuda.synchronize()
-    print("Warmup complete. Starting performance measurement...")
 
-    # --- Get results for correctness check --- 
+    # --- Get Kernel results for correctness check ---
     with torch.random.fork_rng(devices=['cuda']):
-        torch.manual_seed(42) 
-        # Kernel path returns u(C), v(N)
-        outputs_kernel_check = binary_quant_fastpath(
-            x_tensor_cn, base_tensor_cn, delta_base_tensor_cn, 
-            update_cache=True, delta_decay_factor=DELTA_DECAY_FACTOR
+        torch.manual_seed(42)
+        # Kernel returns 4 values now
+        kernel_packed, kernel_scale_u, kernel_scale_v_kn, kernel_new_base = binary_quant_fastpath(
+            x_tensor_cn, base_tensor_cn,
+            rank=RANK_TO_TEST,
+            update_cache=True,
         )
     torch.cuda.synchronize()
 
-    # --- Profiling Kernel --- 
-    print(f"  Profiling binary_quant_fastpath (Kernel, C,N with decay)...")
+    # --- Profiling Kernel ---
     torch.cuda.synchronize()
     start_kernel = time.time()
     for i in range(num_runs):
         update_c = (i % 2 == 0)
         with torch.random.fork_rng(devices=['cuda']):
-            torch.manual_seed(42 + i)
-            _ = binary_quant_fastpath(
-                x_tensor_cn, base_tensor_cn, delta_base_tensor_cn, 
-                update_cache=update_c, delta_decay_factor=DELTA_DECAY_FACTOR
-            )
+             torch.manual_seed(42 + i)
+             _ = binary_quant_fastpath(
+                 x_tensor_cn, base_tensor_cn,
+                 rank=RANK_TO_TEST,
+                 update_cache=update_c,
+             )
     torch.cuda.synchronize()
     end_kernel = time.time()
     kernel_time = (end_kernel - start_kernel) / num_runs
+    print(f"Kernel (Rank {RANK_TO_TEST}): {kernel_time*1000:.3f} ms")
 
-    # --- Verify correctness --- 
-    torch.cuda.synchronize()
-    atol, rtol = 1e-3, 1e-2 
+    # --- Verify correctness ---
+    correct = True
+    issues = []
+    # Packed
+    if not torch.equal(ref_packed, kernel_packed):
+        correct = False; issues.append("Packed")
+    # Scale U
+    if not torch.allclose(ref_scale_u, kernel_scale_u, atol=atol, rtol=rtol):
+        correct = False; issues.append(f"Scale U (Max Diff: {torch.max(torch.abs(ref_scale_u - kernel_scale_u))})")
+    # Scale V (K,N)
+    if not torch.allclose(ref_scale_v_kn, kernel_scale_v_kn, atol=atol, rtol=rtol):
+         correct = False; issues.append(f"Scale V (Max Diff: {torch.max(torch.abs(ref_scale_v_kn - kernel_scale_v_kn))})")
+    # New Base
+    if ref_new_base is not None and kernel_new_base is not None:
+         if not torch.allclose(ref_new_base, kernel_new_base, atol=atol, rtol=rtol):
+             correct = False; issues.append(f"New Base (Max Diff: {torch.max(torch.abs(ref_new_base - kernel_new_base))})")
+    elif ref_new_base is not None or kernel_new_base is not None:
+         correct = False; issues.append("New Base (Mismatch None)")
 
-    # Unpack kernel results: packed, scale_u(C), scale_v(N), ...
-    kernel_packed_dd, kernel_scale_u_c, kernel_scale_v_n, kernel_new_base_cn, kernel_new_delta_base_cn = outputs_kernel_check
-    # Reference values unpacked correctly: ref_scale_u_c (C), ref_scale_v_n (N)
-    
-    if kernel_packed_dd is None: 
-        # Should not happen
-        print("Error: Kernel check run did not produce outputs.")
-        kernel_correct = False
-        k_u_ok, k_v_ok, k_packed_ok, k_new_base_ok, k_new_db_ok = False, False, False, False, False
-    else:
-        # Compare C vs C and N vs N
-        k_u_ok = torch.allclose(ref_scale_u_c, kernel_scale_u_c, atol=atol, rtol=rtol) # Compare C shapes
-        k_v_ok = torch.allclose(ref_scale_v_n, kernel_scale_v_n, atol=atol, rtol=rtol) # Compare N shapes
-        k_packed_ok = torch.equal(ref_packed_dd, kernel_packed_dd)
-        # Base/DB checks
-        k_new_base_ok = torch.allclose(ref_new_base_cn, kernel_new_base_cn, atol=atol, rtol=rtol)
-        k_new_db_ok = torch.allclose(ref_new_delta_base_cn, kernel_new_delta_base_cn, atol=atol, rtol=rtol)
-        kernel_correct = k_u_ok and k_v_ok and k_packed_ok and k_new_base_ok and k_new_db_ok
-
-    # --- Print results --- 
-    print("--- Quant Performance --- (ms per run)")
-    print(f"Kernel (C,N with decay): {kernel_time*1000:.3f}")
-    print("---")
-    print(f"Correctness vs Sim (Kernel): {kernel_correct}")
-    if not kernel_correct:
-        # Print comparisons C vs C and N vs N
-        print(f"  Scale U(C vs C) OK: {k_u_ok}, Scale V(N vs N) OK: {k_v_ok}, Packed OK: {k_packed_ok}, NewBase OK: {k_new_base_ok}, NewDeltaBase OK: {k_new_db_ok}")
-        if not k_u_ok: print(f"    Max kernel scale_C diff: {torch.max(torch.abs(ref_scale_u_c - kernel_scale_u_c))}")
-        if not k_v_ok: print(f"    Max kernel scale_N diff: {torch.max(torch.abs(ref_scale_v_n - kernel_scale_v_n))}")
-        if not k_packed_ok: print(f"    Kernel packed tensors differ.")
-        if not k_new_base_ok: print(f"    Max kernel new_base_cn diff: {torch.max(torch.abs(ref_new_base_cn - kernel_new_base_cn))}")
-        if not k_new_db_ok: print(f"    Max kernel new_delta_base_cn diff: {torch.max(torch.abs(ref_new_delta_base_cn - kernel_new_delta_base_cn))}")
+    print(f"Correctness vs Sim (Rank {RANK_TO_TEST}): {correct}")
+    if not correct: print(f"  Issues: {', '.join(issues)}\n")
     print("---")
 
-    return kernel_time
 
-# --- Test Function for Dequantization Kernel --- 
 def profile_dequantize_kernels(num_runs=1000, num_warmup=5):
-    """Profile fused dequantization kernel assuming C,N inputs/outputs."""
-    import time # Ensure time is imported
-    # Setup
+    """Profile dequantize kernel."""
+    import time
     N_TOKENS, CHANNEL = 4096, 2048
-    DELTA_DECAY_FACTOR = 0.5
+    atol, rtol = 1e-3, 1e-2
+    RANK_TO_TEST = 4 # <<< Set Rank for testing
 
-    # --- Generate Realistic Inputs (using quant sim) --- 
+    print("--- Dequant Performance & Correctness --- (ms per run)")
+
+    print(f"\nTesting Rank: {RANK_TO_TEST}")
+    # Setup Tensors
     x_tensor_cn = (torch.randn((CHANNEL, N_TOKENS), dtype=torch.half, device="cuda") * 0.5).contiguous()
     base_cn = (torch.randn_like(x_tensor_cn) * 0.1).contiguous()
-    delta_base_cn = (torch.randn_like(x_tensor_cn) * 0.05).contiguous()
+
+    # --- Generate Inputs using Quant Sim ---
+    # Quant sim args simplified
+    quant_sim_args = (x_tensor_cn, base_cn, RANK_TO_TEST, False)
+
     with torch.random.fork_rng(devices=['cuda']):
         torch.manual_seed(42)
-        # Quant sim returns packed, u(C), v(N) -> unpack accordingly
-        input_packed_dd, input_scale_u_c, input_scale_v_n, _, _ = sim_binary_quant_fastpath(
-            x_tensor_cn, base_cn, delta_base_cn, 
-            update_cache=False, delta_decay_factor=DELTA_DECAY_FACTOR 
-        )
+        # Quant sim returns 4 values now
+        input_packed, input_scale_u_ck, input_scale_v_kn, _ = sim_binary_quant_fastpath(*quant_sim_args)
 
-    # --- Calculate Reference Outputs (using dequant sim) --- 
-    # Dequant sim expects packed, u(C), v(N) - pass in correct order
-    ref_reconstructed_cn, ref_new_delta_base_cn = sim_binary_dequant_fastpath(
-        input_packed_dd, input_scale_u_c, input_scale_v_n, 
-        base_cn, delta_base_cn, delta_decay_factor=DELTA_DECAY_FACTOR
-    )
+    # --- Calculate Reference Outputs (Dequant Simulation) ---
+    # Dequant sim args simplified
+    dequant_sim_args = (input_packed, input_scale_u_ck, input_scale_v_kn, base_cn, RANK_TO_TEST)
 
-    # --- Warm-up runs --- 
-    print(f"Running {num_warmup} warmup iterations for dequant kernel & sim...")
+    # Sim function returns 1 value now
+    ref_reconstructed_cn = sim_binary_dequant_fastpath(*dequant_sim_args)
+
+    # --- Warm-up runs ---
     for _ in range(num_warmup):
-        # Kernel expects packed, u(C), v(N) - PASS in correct order
         _ = binary_dequant_fastpath(
-            input_packed_dd, input_scale_u_c, input_scale_v_n, 
-            base_cn, delta_base_cn, delta_decay_factor=DELTA_DECAY_FACTOR
+            input_packed, input_scale_u_ck, input_scale_v_kn,
+            base_cn,
+            rank=RANK_TO_TEST,
         )
-        # Sim expects packed, u(C), v(N) - pass in correct order
-        _ = sim_binary_dequant_fastpath(
-            input_packed_dd, input_scale_u_c, input_scale_v_n, 
-            base_cn, delta_base_cn, delta_decay_factor=DELTA_DECAY_FACTOR
-        )
+        _ = sim_binary_dequant_fastpath(*dequant_sim_args)
         torch.cuda.synchronize()
-    print("Warmup complete. Starting dequant performance measurement...")
 
-    # --- Get results for correctness check --- 
-    # Kernel expects packed, u(C), v(N) - PASS in correct order
-    outputs_kernel_check = binary_dequant_fastpath(
-        input_packed_dd, input_scale_u_c, input_scale_v_n, 
-        base_cn, delta_base_cn, delta_decay_factor=DELTA_DECAY_FACTOR
+    # --- Get Kernel results for correctness check ---
+    # Kernel returns 1 value now
+    kernel_reconstructed_cn = binary_dequant_fastpath(
+        input_packed, input_scale_u_ck, input_scale_v_kn,
+        base_cn,
+        rank=RANK_TO_TEST,
     )
-    # Reference values already calculated
     torch.cuda.synchronize()
 
-    # --- Profiling Kernel --- 
-    print(f"  Profiling binary_dequant_fastpath (Kernel, C,N)...")
+    # --- Profiling Kernel ---
     torch.cuda.synchronize()
     start_kernel = time.time()
-    for i in range(num_runs):
-        # Kernel expects packed, u(C), v(N) - PASS in correct order
+    for _ in range(num_runs):
         _ = binary_dequant_fastpath(
-            input_packed_dd, input_scale_u_c, input_scale_v_n,
-            base_cn, delta_base_cn,
-            delta_decay_factor=DELTA_DECAY_FACTOR
+            input_packed, input_scale_u_ck, input_scale_v_kn,
+            base_cn,
+            rank=RANK_TO_TEST,
         )
     torch.cuda.synchronize()
     end_kernel = time.time()
     kernel_time = (end_kernel - start_kernel) / num_runs
+    print(f"Kernel (Rank {RANK_TO_TEST}): {kernel_time*1000:.3f} ms")
 
-    # --- Verify correctness --- 
-    torch.cuda.synchronize()
-    atol, rtol = 1e-3, 1e-2 
+    # --- Verify correctness ---
+    correct = True
+    issues = []
+    # Reconstructed
+    if not torch.allclose(ref_reconstructed_cn, kernel_reconstructed_cn, atol=atol, rtol=rtol):
+        correct = False; issues.append(f"Reconstructed (Max Diff: {torch.max(torch.abs(ref_reconstructed_cn - kernel_reconstructed_cn))})")
 
-    kernel_reconstructed_cn, kernel_new_delta_base_cn = outputs_kernel_check
-    k_recon_ok = torch.allclose(ref_reconstructed_cn, kernel_reconstructed_cn, atol=atol, rtol=rtol)
-    k_new_db_ok = torch.allclose(ref_new_delta_base_cn, kernel_new_delta_base_cn, atol=atol, rtol=rtol)
-    kernel_correct = k_recon_ok and k_new_db_ok
-
-    # --- Print results --- 
-    print("--- Dequant Performance --- (ms per run)")
-    print(f"Kernel Dequant (C,N): {kernel_time*1000:.3f}")
-    print("---")
-    print(f"Correctness vs Sim (Kernel): {kernel_correct}")
-    if not kernel_correct:
-        print(f"  Recon OK: {k_recon_ok}, New Delta Base OK: {k_new_db_ok}")
-        if not k_recon_ok: print(f"    Max kernel reconstructed_cn diff: {torch.max(torch.abs(ref_reconstructed_cn - kernel_reconstructed_cn))}")
-        if not k_new_db_ok: print(f"    Max kernel new_delta_base_cn diff: {torch.max(torch.abs(ref_new_delta_base_cn - kernel_new_delta_base_cn))}")
+    print(f"Correctness vs Sim (Rank {RANK_TO_TEST}): {correct}")
+    if not correct: print(f"  Issues: {', '.join(issues)}\n")
     print("---")
 
-    return kernel_time
 
 if __name__ == "__main__":
-    # Now the test functions should work with the simulation reference
+    # Test functions only need to run once now
     profile_quantize_kernels()
     profile_dequantize_kernels()
