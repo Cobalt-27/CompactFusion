@@ -304,7 +304,7 @@ def compact_decompress(
             from xfuser.compact.fastpath import binary_dequant_fastpath
 
             N, C = shape # Original shape (N, C) after reshape
-            rank = _config.comp_rank
+            rank = _config.comp_rank if _config.comp_rank != -1 else 1
             assert N % 8 == 0
 
             # Calculate split sizes for packed(uint8), scale_u(C,K), scale_v(K,N)
@@ -336,7 +336,7 @@ def compact_decompress(
                 scale_u_ck=scale_u_ck,
                 scale_v_kn=scale_v_kn, # <<< Pass V(K, N)
                 base_cn=base_cn,
-                rank=rank,
+                # rank=rank,
             )
             if update_cache:
                 # Put None for delta_base as it's L1

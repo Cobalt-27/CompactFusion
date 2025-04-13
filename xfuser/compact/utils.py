@@ -121,7 +121,10 @@ class CompactCache:
         # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-        self.base[key] = base
+        if key in self.base:
+            self.base[key].copy_(base)
+        else:
+            self.base[key] = base
 
         # Compress or store delta_base
         if delta_base is not None:
