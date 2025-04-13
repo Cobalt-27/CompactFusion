@@ -1,8 +1,8 @@
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
-export CAPTION_FILE="ref_images/prompts.json"
-export SAMPLE_IMAGES_FOLODER="generated_images_flux"
+export CAPTION_FILE="/root/autodl-tmp/ref_images/prompts.json"
+export SAMPLE_IMAGES_FOLODER="/root/autodl-tmp/original_images"
 
 # Select the model type
 export MODEL_TYPE="Flux"
@@ -24,9 +24,9 @@ fi
 # task args
 TASK_ARGS="--height 1024 --width 1024 --no_use_resolution_binning"
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-N_GPUS=4
-PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 4"
+export CUDA_VISIBLE_DEVICES=0
+N_GPUS=1
+PARALLEL_ARGS="--pipefusion_parallel_degree 1 --ulysses_degree 1 --ring_degree 1"
 
 torchrun --nproc_per_node=$N_GPUS ./benchmark/fid/$SCRIPT \
 --model $MODEL_ID \

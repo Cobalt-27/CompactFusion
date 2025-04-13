@@ -37,7 +37,7 @@ def main():
     from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
-        enabled=True,
+        enabled=False,
         compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=16,
@@ -85,6 +85,7 @@ def main():
     # run multiple prompts at a time to save time
     num_prompt_one_step = 1
     compact_hello()
+    total_time = []
     for j in range(0, _NUM_FID_CANDIDATE, num_prompt_one_step):
         start_time = time.time()
         compact_reset()
@@ -99,14 +100,15 @@ def main():
             generator=torch.Generator(device='cuda').manual_seed(input_config.seed),
         )
         end_time = time.time()
-        print(f'Time taken: {end_time - start_time} seconds')
+        total_time.append(end_time - start_time)
         if input_config.output_type == 'pil':
             if pipe.is_dp_last_group():
                 for k, local_filename in enumerate(filenames[j:j+num_prompt_one_step]):
-                    output.images[k].save(f'{folder_path}/{local_filename}')
-        print(f'{j}-{j+num_prompt_one_step-1} generation finished!')
+                    output.images[k].save(f'{folder_path}/{j+k:05d}.png')
         flush()
-
+        
+    if get_world_group().rank == 0:
+        print(f'Average time: {sum(total_time) / len(total_time)} seconds')
     get_runtime_state().destory_distributed_env()
 
 

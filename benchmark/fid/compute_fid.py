@@ -60,7 +60,8 @@ def compute_fid_score(ref_path: str, sample_path: str, device: str = "cuda") -> 
             sample_path,
             device=torch_device,
             num_workers=8,  # Can be adjusted as needed
-            use_dataparallel=False  # Disable DataParallel to avoid device issues
+            use_dataparallel=False,  # Disable DataParallel to avoid device issues
+            custom_fn_resize=lambda x: x.resize((1024, 1024), Image.LANCZOS)
         )
         
         elapsed_time = time.time() - start_time
