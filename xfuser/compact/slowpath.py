@@ -157,8 +157,5 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         assert rank is not None
         u, v, _ = subspace_iter(x, rank, 2) # Use provided rank
         return torch.matmul(u, v)
-    elif compress_type == COMPACT_COMPRESS_TYPE.BINARY_MEAN_AS_SCALE:
-        # This type explicitly uses mean, equivalent to rank=-1
-        return sim_binary(x, rank=-1)
     else:
         raise ValueError("Invalid compress_type value")

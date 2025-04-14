@@ -34,7 +34,7 @@ def subspace_iter(
 
 
 
-# @torch.jit.script
+@torch.jit.script
 def _subspace_iter(
     A: torch.Tensor, rank: int, num_iters: int = 10, init_q: torch.Tensor | None = None
 ):
@@ -58,19 +58,19 @@ def _subspace_iter(
     dtype = A.dtype
     A = A.float()
     # Step 1: Initialize a random matrix Q of shape (n, rank) and orthonormalize it.
-    with Profiler.scope("subspace_iter.init_q"): # avg=0.08ms
-        if init_q is None:
-            Q = torch.randn(n, rank, device=device, dtype=torch.float)
-            Q, _ = torch.linalg.qr(Q)  # Q is (n, rank) 
-        else:
-            Q = init_q.float()
+    # with Profiler.scope("subspace_iter.init_q"): # avg=0.08ms
+    if init_q is None:
+        Q = torch.randn(n, rank, device=device, dtype=torch.float)
+        Q, _ = torch.linalg.qr(Q)  # Q is (n, rank) 
+    else:
+        Q = init_q.float()
 
     # Step 2: Perform subspace iteration on the right subspace.
     for i in range(num_iters):
-        with Profiler.scope("subspace_iter.A_t_A_Q"):
-            Z = A.t() @ (A @ Q)  # Shape: (n, rank) avg=0.10ms
-        with Profiler.scope("subspace_iter.qr"):
-            Q, _ = torch.linalg.qr(Z) # 0.08ms
+        # with Profiler.scope("subspace_iter.A_t_A_Q"):
+        Z = A.t() @ (A @ Q)  # Shape: (n, rank) avg=0.10ms
+        # with Profiler.scope("subspace_iter.qr"):
+        Q, _ = torch.linalg.qr(Z) # 0.08ms
 
     # Step 3: Recover the left singular subspace.
     # Compute U = A Q, then orthonormalize U.
@@ -84,10 +84,10 @@ def _subspace_iter(
     return U.to(dtype), V.to(dtype), Q.to(dtype)
 
 # @Profiler.prof_func("compact.power_iteration")
-@torch.compile
+@torch.jit.script
 def _power_iteration(
     A: torch.Tensor, num_iters: int, v: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Computes a rank-1 approximation A ≈ U @ V using power iteration.
     This focuses on finding the factors U and V directly.
@@ -105,8 +105,8 @@ def _power_iteration(
     input_dtype = A.dtype
 
     # Initialize a random vector for the right singular vector v
-    v = torch.randn(n, 1, device=device, dtype=torch.float)
-    v = v / torch.norm(v, dim=0) # Normalize v
+    # v = torch.randn(n, 1, device=device, dtype=torch.float)
+    # v = v / torch.norm(v, dim=0) # Normalize v
 
     A_float = A.float() # Perform iterations in float32 for stability
 

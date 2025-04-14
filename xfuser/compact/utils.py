@@ -16,7 +16,6 @@ class COMPACT_COMPRESS_TYPE(Enum):
     WARMUP = "warmup"
     SPARSE = "sparse"
     BINARY = "binary"
-    BINARY_MEAN_AS_SCALE = "binary-mean-as-scale"
     INT2 = "int2"
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
     LOW_RANK = "low-rank"

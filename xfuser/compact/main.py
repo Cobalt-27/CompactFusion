@@ -99,19 +99,19 @@ def compact_reset():
 
 
 @Profiler.prof_func("compact._compress_fn")
-def _compress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE):
+def _compress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, rank: int):
     if _config.simulate_compress:
         # NOTE: if simulation enabled, directly return the simulated compress-then-decompress result
-        return sim_compress(x, compress_type, _config.sparse_ratio, _config.comp_rank)
+        return sim_compress(x, compress_type, _config.sparse_ratio, rank)
 
-    return slowpath_compress(x, compress_type, rank=_config.comp_rank, sparse_ratio=_config.sparse_ratio)
+    return slowpath_compress(x, compress_type, rank=rank, sparse_ratio=_config.sparse_ratio)
 
             
 @Profiler.prof_func("compact._decompress_fn")
-def _decompress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, shape: tuple):
+def _decompress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, shape: tuple, rank: int):
     if _config.simulate_compress:
         return x.view(shape)  # no need for further decompression
-    return slowpath_decompress(x, shape, compress_type, rank=_config.comp_rank, sparse_ratio=_config.sparse_ratio)
+    return slowpath_decompress(x, shape, compress_type, rank=rank, sparse_ratio=_config.sparse_ratio)
 
 @Profiler.prof_func("compact.compact_compress")
 def compact_compress(
@@ -119,6 +119,7 @@ def compact_compress(
     x: torch.Tensor,
     compress_type: COMPACT_COMPRESS_TYPE,
     update_cache: bool = False,
+    override_rank: int = None,
 ):
     assert x.is_contiguous()
     assert _config.enabled
@@ -130,7 +131,8 @@ def compact_compress(
         x = x.view(shape)
     assert x.ndim == 2
     # NOTE: reshaped to (N-token, channel)
-
+    rank = _config.comp_rank if override_rank is None else override_rank
+    
     def cond_cache_put(key, val, delta):
         if update_cache:
             _cache.put(key, val, delta)
@@ -161,7 +163,7 @@ def compact_compress(
             q, scale_u_ck, scale_v_kn, new_base = binary_quant_fastpath(
                 x_tensor_nc=x,
                 base_tensor_nc=base,
-                rank=_config.comp_rank,
+                rank=rank,
                 update_cache=update_cache,
             )
             # q: (N, C//8), scale_u_nk: (N, K), scale_v_ck: (C, K), new_base: (N, C)
@@ -193,7 +195,7 @@ def compact_compress(
             if _config.compress_residual == 0:
                 compressed = _compress_fn(x, compress_type)
                 if _config.log_compress_stats:
-                    reconstructed_local = _decompress_fn(compressed, compress_type, x.shape)
+                    reconstructed_local = _decompress_fn(compressed, compress_type, x.shape, rank)
                     stats_log().log(
                         cache_key, 
                         base=None, 
@@ -209,8 +211,8 @@ def compact_compress(
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
                 delta = x - base
-                compressed = _compress_fn(delta, compress_type)
-                recv_delta = _decompress_fn(compressed, compress_type, x.shape)
+                compressed = _compress_fn(delta, compress_type, rank)
+                recv_delta = _decompress_fn(compressed, compress_type, x.shape, rank)
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
                 if _config.log_compress_stats:
@@ -230,8 +232,8 @@ def compact_compress(
                 base = _cache.get_base(cache_key)
                 delta_base = _cache.get_delta_base(cache_key)
                 delta_delta = x - base - delta_base
-                compressed = _compress_fn(delta_delta, compress_type)
-                recv_delta_delta = _decompress_fn(compressed, compress_type, x.shape)
+                compressed = _compress_fn(delta_delta, compress_type, rank)
+                recv_delta_delta = _decompress_fn(compressed, compress_type, x.shape, rank)
                 new_base = base + delta_base + recv_delta_delta
                 new_delta_base = delta_base + recv_delta_delta
                 cond_cache_put(
@@ -267,6 +269,7 @@ def compact_decompress(
     compress_type: COMPACT_COMPRESS_TYPE,
     shape: tuple,
     update_cache: bool = False,
+    override_rank: int = None,
 ):
     assert _config.enabled
     original_shape = shape
@@ -284,6 +287,9 @@ def compact_decompress(
     def cond_cache_put(key, val, delta):
         if update_cache:
             _cache.put(key, val, delta)
+    rank = _config.comp_rank if override_rank is None else override_rank
+    if rank == -1:
+        rank = 1 # effective rank is 1 for mean
 
     if compress_type == COMPACT_COMPRESS_TYPE.WARMUP:
         val = compressed.view(shape)
@@ -308,7 +314,6 @@ def compact_decompress(
             from xfuser.compact.fastpath import binary_dequant_fastpath
 
             N, C = shape # Shape is N, C after initial reshape
-            rank = _config.comp_rank if _config.comp_rank != -1 else 1
             assert C % 8 == 0, "Channel dim C must be divisible by 8 for binary fastpath"
 
             # Calculate split sizes for packed(N,C//8 uint8), scale_u(N,K half), scale_v(C,K half)
@@ -348,16 +353,16 @@ def compact_decompress(
             reconstructed = reconstructed_nc # Already (N, C)
         else:
             if _config.compress_residual == 0:
-                reconstructed = _decompress_fn(compressed, compress_type, shape)
+                reconstructed = _decompress_fn(compressed, compress_type, shape, rank)
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
-                recv_delta = _decompress_fn(compressed, compress_type, shape)
+                recv_delta = _decompress_fn(compressed, compress_type, shape, rank)
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
             elif _config.compress_residual == 2:
                 base = _cache.get_base(cache_key)
                 delta_base = _cache.get_delta_base(cache_key)
-                recv_delta_delta = _decompress_fn(compressed, compress_type, shape)
+                recv_delta_delta = _decompress_fn(compressed, compress_type, shape, rank)
                 reconstructed = base + delta_base + recv_delta_delta
                 new_delta_base = delta_base + recv_delta_delta
                 cond_cache_put(cache_key, reconstructed, _decay_delta_base(new_delta_base))
