@@ -5,8 +5,10 @@ import os # Added for path operations
 import matplotlib.pyplot as plt
 from typing import Optional, Dict, List, Tuple
 
-EIGENVALUES_PLOT_STEPS = [1]
-EIGENVALUES_PLOT_LAYERS = [0, 1]
+# EIGENVALUES_PLOT_STEPS = [1]
+# EIGENVALUES_PLOT_LAYERS = [0, 1]
+EIGENVALUES_PLOT_STEPS = []
+EIGENVALUES_PLOT_LAYERS = []
 
 class StatsLogger:
     """Simple statistics logger for compression metrics."""

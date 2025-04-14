@@ -15,7 +15,7 @@ from yunchang.kernels import select_flash_attn_impl
 from yunchang.comm.all_to_all import SeqAllToAll4D
 from torch import Tensor
 
-from xfuser.compact.utils import CompactCache, CompactCache
+from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
 from xfuser.compact.main import (
     compact_config,
     compact_cache,
@@ -135,9 +135,18 @@ def _compact_ring_fwd(
     v_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-v"
     original_k_shape = k.shape 
     original_v_shape = v.shape
-    k_to_send = compact_compress(k_my_cache_key, k, compress_type, update_cache=True)
-    v_to_send = compact_compress(v_my_cache_key, v, compress_type, update_cache=True)
-
+    k_compress_rank = compact_config().comp_rank
+    v_compress_rank = compact_config().comp_rank
+    if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
+        # low rank as scale is expensive, we use lowrank with stride=2 for v
+        k_compress_rank = -1 # k is not low-rank, so we use mean as scale
+        if current_iter % 2 == 0:
+            v_compress_rank = -1
+        else:
+            v_compress_rank = compact_config().comp_rank
+    k_to_send = compact_compress(k_my_cache_key, k, compress_type, update_cache=True, override_rank=k_compress_rank)
+    v_to_send = compact_compress(v_my_cache_key, v, compress_type, update_cache=True, override_rank=v_compress_rank)
+    
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
             buf_k: torch.Tensor = comm.send_recv(k_to_send)
@@ -149,10 +158,10 @@ def _compact_ring_fwd(
             k_recv_cache_key = f"{mod_idx}-{recv_rank}-k"
             v_recv_cache_key = f"{mod_idx}-{recv_rank}-v"
             k = compact_decompress(
-                k_recv_cache_key, k_to_send, prev_compress_type, original_k_shape, update_cache=True
+                k_recv_cache_key, k_to_send, prev_compress_type, original_k_shape, update_cache=True, override_rank=k_compress_rank
             )
             v = compact_decompress(
-                v_recv_cache_key, v_to_send, prev_compress_type, original_v_shape, update_cache=True
+                v_recv_cache_key, v_to_send, prev_compress_type, original_v_shape, update_cache=True, override_rank=v_compress_rank
             )
         k = k.contiguous() 
         v = v.contiguous()
@@ -218,7 +227,6 @@ def _compact_ring_fwd(
             k_to_send = buf_k 
             v_to_send = buf_v
             prev_compress_type = compress_type
-
     out = out.to(q.dtype)
     lse = lse.squeeze(dim=-1).transpose(1, 2)
     if compact_config().check_cache_consistency:

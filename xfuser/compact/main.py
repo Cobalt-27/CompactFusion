@@ -99,19 +99,19 @@ def compact_reset():
 
 
 @Profiler.prof_func("compact._compress_fn")
-def _compress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE):
+def _compress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, rank: int):
     if _config.simulate_compress:
         # NOTE: if simulation enabled, directly return the simulated compress-then-decompress result
-        return sim_compress(x, compress_type, _config.sparse_ratio, _config.comp_rank)
+        return sim_compress(x, compress_type, _config.sparse_ratio, rank)
 
-    return slowpath_compress(x, compress_type, rank=_config.comp_rank, sparse_ratio=_config.sparse_ratio)
+    return slowpath_compress(x, compress_type, rank=rank, sparse_ratio=_config.sparse_ratio)
 
             
 @Profiler.prof_func("compact._decompress_fn")
-def _decompress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, shape: tuple):
+def _decompress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, shape: tuple, rank: int):
     if _config.simulate_compress:
         return x.view(shape)  # no need for further decompression
-    return slowpath_decompress(x, shape, compress_type, rank=_config.comp_rank, sparse_ratio=_config.sparse_ratio)
+    return slowpath_decompress(x, shape, compress_type, rank=rank, sparse_ratio=_config.sparse_ratio)
 
 @Profiler.prof_func("compact.compact_compress")
 def compact_compress(
@@ -119,6 +119,7 @@ def compact_compress(
     x: torch.Tensor,
     compress_type: COMPACT_COMPRESS_TYPE,
     update_cache: bool = False,
+    override_rank: int = None,
 ):
     assert x.is_contiguous()
     assert _config.enabled
@@ -130,7 +131,8 @@ def compact_compress(
         x = x.view(shape)
     assert x.ndim == 2
     # NOTE: reshaped to (N-token, channel)
-
+    rank = _config.comp_rank if override_rank is None else override_rank
+    
     def cond_cache_put(key, val, delta):
         if update_cache:
             _cache.put(key, val, delta)
@@ -138,8 +140,8 @@ def compact_compress(
     if compress_type == COMPACT_COMPRESS_TYPE.WARMUP:
         if _config.fastpath:
             assert _config.compress_residual == 1
-            x_t = x.transpose(0, 1)
-            cond_cache_put(cache_key, x_t, None)
+            # Cache directly in N, C format
+            cond_cache_put(cache_key, x, None)
         else:
             if _config.compress_residual == 1:
                 cond_cache_put(cache_key, x, None)
@@ -155,25 +157,28 @@ def compact_compress(
             assert compress_type == COMPACT_COMPRESS_TYPE.BINARY
             assert _config.compress_residual == 1
             from xfuser.compact.fastpath import binary_quant_fastpath
-            base = _cache.get_base(cache_key)
-            x_t = x.transpose(0, 1).contiguous()
+            # Base should be (N, C) now
+            base = _cache.get_base(cache_key) 
+            # Call with N, C layout
             q, scale_u_ck, scale_v_kn, new_base = binary_quant_fastpath(
-                x_tensor_cn=x_t,
-                base_tensor_cn=base,
-                rank=_config.comp_rank,
+                x_tensor_nc=x,
+                base_tensor_nc=base,
+                rank=rank,
                 update_cache=update_cache,
             )
+            # q: (N, C//8), scale_u_nk: (N, K), scale_v_ck: (C, K), new_base: (N, C)
             if update_cache:
+                # new_base is already N, C
                 _cache.put(cache_key, new_base, None)
 
             q_flat_half = q.view(torch.half).flatten()
-            u_flat_half = scale_u_ck.flatten()
-            v_flat_half = scale_v_kn.flatten()
+            u_flat_half = scale_u_ck.flatten() # New: U is (N, K)
+            v_flat_half = scale_v_kn.flatten() # New: V is (C, K)
             compressed = torch.cat([q_flat_half, u_flat_half, v_flat_half], dim=0)
 
             if _config.log_compress_stats:
-                log_base = base.transpose(0, 1) if base is not None else None
-                log_recv_activation = new_base.transpose(0, 1) if new_base is not None else None
+                log_base = base # Already N, C
+                log_recv_activation = new_base # Already N, C
                 stats_log().log(
                     cache_key,
                     log_base,
@@ -190,7 +195,7 @@ def compact_compress(
             if _config.compress_residual == 0:
                 compressed = _compress_fn(x, compress_type)
                 if _config.log_compress_stats:
-                    reconstructed_local = _decompress_fn(compressed, compress_type, x.shape)
+                    reconstructed_local = _decompress_fn(compressed, compress_type, x.shape, rank)
                     stats_log().log(
                         cache_key, 
                         base=None, 
@@ -206,8 +211,8 @@ def compact_compress(
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
                 delta = x - base
-                compressed = _compress_fn(delta, compress_type)
-                recv_delta = _decompress_fn(compressed, compress_type, x.shape)
+                compressed = _compress_fn(delta, compress_type, rank)
+                recv_delta = _decompress_fn(compressed, compress_type, x.shape, rank)
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
                 if _config.log_compress_stats:
@@ -227,8 +232,8 @@ def compact_compress(
                 base = _cache.get_base(cache_key)
                 delta_base = _cache.get_delta_base(cache_key)
                 delta_delta = x - base - delta_base
-                compressed = _compress_fn(delta_delta, compress_type)
-                recv_delta_delta = _decompress_fn(compressed, compress_type, x.shape)
+                compressed = _compress_fn(delta_delta, compress_type, rank)
+                recv_delta_delta = _decompress_fn(compressed, compress_type, x.shape, rank)
                 new_base = base + delta_base + recv_delta_delta
                 new_delta_base = delta_base + recv_delta_delta
                 cond_cache_put(
@@ -264,6 +269,7 @@ def compact_decompress(
     compress_type: COMPACT_COMPRESS_TYPE,
     shape: tuple,
     update_cache: bool = False,
+    override_rank: int = None,
 ):
     assert _config.enabled
     original_shape = shape
@@ -281,12 +287,16 @@ def compact_decompress(
     def cond_cache_put(key, val, delta):
         if update_cache:
             _cache.put(key, val, delta)
+    rank = _config.comp_rank if override_rank is None else override_rank
+    if rank == -1:
+        rank = 1 # effective rank is 1 for mean
 
     if compress_type == COMPACT_COMPRESS_TYPE.WARMUP:
         val = compressed.view(shape)
         if _config.fastpath:
             assert _config.compress_residual == 1
-            cond_cache_put(cache_key, val.transpose(0, 1), None)
+            # Cache directly in N, C format
+            cond_cache_put(cache_key, val, None)
         else:
             if _config.compress_residual == 1:
                 cond_cache_put(cache_key, val, None)
@@ -303,19 +313,18 @@ def compact_decompress(
             assert _config.compress_residual == 1
             from xfuser.compact.fastpath import binary_dequant_fastpath
 
-            N, C = shape # Original shape (N, C) after reshape
-            rank = _config.comp_rank
-            assert N % 8 == 0
+            N, C = shape # Shape is N, C after initial reshape
+            assert C % 8 == 0, "Channel dim C must be divisible by 8 for binary fastpath"
 
-            # Calculate split sizes for packed(uint8), scale_u(C,K), scale_v(K,N)
-            q_numel_uint8 = C * (N // 8)
-            q_numel_half = q_numel_uint8 // 2 # Stored as half
-            u_numel_half = C * rank             # U is (C, K)
-            v_numel_half = rank * N             # V is (K, N)
+            # Calculate split sizes for packed(N,C//8 uint8), scale_u(N,K half), scale_v(C,K half)
+            q_numel_uint8 = N * (C // 8)
+            q_numel_half = q_numel_uint8 // 2 # Stored as FP16 view
+            u_numel_half = N * rank             # U is (N, K)
+            v_numel_half = C * rank             # V is (C, K)
 
             expected_numel = q_numel_half + u_numel_half + v_numel_half
             assert compressed.numel() == expected_numel, \
-                f"Mismatch in compressed tensor size: expected {expected_numel} (q={q_numel_half}, u={u_numel_half}, v={v_numel_half}), got {compressed.numel()}"
+                f"Mismatch in compressed tensor size: expected {expected_numel} (q={q_numel_half}, u={u_numel_half}, v={v_numel_half}), got {compressed.numel()}, Shape (N,C)=({N},{C}), Rank={rank}"
 
             # Split the compressed tensor
             q_half, scale_u_flat, scale_v_flat = torch.split(
@@ -324,36 +333,36 @@ def compact_decompress(
             )
 
             # Reshape
-            packed_cn8 = q_half.view(torch.uint8).view(C, N // 8)
-            scale_u_ck = scale_u_flat.view(C, rank)
-            scale_v_kn = scale_v_flat.view(rank, N) # <<< Reshape V to (K, N)
+            packed_nc8 = q_half.view(torch.uint8).view(N, C // 8)
+            scale_u_nk = scale_u_flat.view(N, rank)
+            scale_v_ck = scale_v_flat.view(C, rank)
 
-            base_cn = _cache.get_base(cache_key)
+            base_nc = _cache.get_base(cache_key)
 
             # Updated function call signature and return value
-            reconstructed_cn = binary_dequant_fastpath(
-                packed_in_cn8=packed_cn8,
-                scale_u_ck=scale_u_ck,
-                scale_v_kn=scale_v_kn, # <<< Pass V(K, N)
-                base_cn=base_cn,
-                rank=rank,
+            reconstructed_nc = binary_dequant_fastpath(
+                packed_in_nc8=packed_nc8,
+                scale_u_nk=scale_u_nk,
+                scale_v_ck=scale_v_ck,
+                base_nc=base_nc,
+                # rank=rank,
             )
+            # reconstructed_nc is (N, C)
             if update_cache:
-                # Put None for delta_base as it's L1
-                _cache.put(cache_key, reconstructed_cn, None)
-            reconstructed = reconstructed_cn.transpose(0, 1).contiguous()
+                _cache.put(cache_key, reconstructed_nc, None)
+            reconstructed = reconstructed_nc # Already (N, C)
         else:
             if _config.compress_residual == 0:
-                reconstructed = _decompress_fn(compressed, compress_type, shape)
+                reconstructed = _decompress_fn(compressed, compress_type, shape, rank)
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
-                recv_delta = _decompress_fn(compressed, compress_type, shape)
+                recv_delta = _decompress_fn(compressed, compress_type, shape, rank)
                 reconstructed = base + recv_delta
                 cond_cache_put(cache_key, reconstructed, None)
             elif _config.compress_residual == 2:
                 base = _cache.get_base(cache_key)
                 delta_base = _cache.get_delta_base(cache_key)
-                recv_delta_delta = _decompress_fn(compressed, compress_type, shape)
+                recv_delta_delta = _decompress_fn(compressed, compress_type, shape, rank)
                 reconstructed = base + delta_base + recv_delta_delta
                 new_delta_base = delta_base + recv_delta_delta
                 cond_cache_put(cache_key, reconstructed, _decay_delta_base(new_delta_base))
