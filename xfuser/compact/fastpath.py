@@ -15,510 +15,474 @@ def _bitwise_or(a, b):
 
 @triton.jit
 def _binary_quant_fastpath(
-    # Input Pointers (Layout C, N)
-    x_ptr,             # Current activation (C, N)
-    base_ptr,          # Cached base (C, N)
-    scale_u_ptr,       # Input scale factor u (C, K or C, 1)
-    scale_v_ptr,       # Input scale factor v (K, N or 1, N)
+    # Input Pointers (Layout N, C)
+    x_ptr,             # Current activation (N, C)
+    base_ptr,          # Cached base (N, C)
+    scale_u_ptr,       # Input scale factor u (N, K)
+    scale_v_ptr,       # Input scale factor v (C, K)
     # Output Pointers
-    packed_out_ptr,    # Packed delta (C, N//8) - OUTPUT
-    new_base_ptr,      # Output new base (C, N) - optional write
+    packed_out_ptr,    # Packed delta (N, C//8) - OUTPUT
+    new_base_ptr,      # Output new base (N, C) - optional write
     # Dimensions
-    N_TOKENS: tl.constexpr, # Original N
-    CHANNEL: tl.constexpr,  # Original C
-    N_TOKENS_8: tl.constexpr, # N_TOKENS // 8
-    RANK: tl.constexpr,      # Effective rank (1 for mean, K for subspace)
-    # Strides (ALL are for C, N layout, except packed and scale)
-    stride_xc, stride_xn,
-    stride_bc, stride_bn,
-    stride_scale_uc, stride_scale_uk, # Stride for u (C, K or C, 1)
-    stride_scale_vn, stride_scale_vk, # Stride for v (K, N or 1, N)
-    stride_packed_c, stride_packed_n8, # Strides for packed output (C, N//8)
-    stride_newb_c, stride_newb_n,      # Strides for new_base (C, N)
+    N_ROWS: tl.constexpr,    # Original N
+    C_COLS: tl.constexpr,    # Original C
+    C_COLS_8: tl.constexpr,  # C_COLS // 8
+    RANK: tl.constexpr,       # Effective rank K
+    # Strides (ALL are for N, C layout, except packed and scales)
+    stride_xn, stride_xc,
+    stride_bn, stride_bc,
+    stride_scale_un, stride_scale_uk, # Strides for U (N, K)
+    stride_scale_vc, stride_scale_vk, # Strides for V (C, K)
+    stride_packed_n, stride_packed_c8, # Strides for packed output (N, C//8)
+    stride_newb_n, stride_newb_c,      # Strides for new_base (N, C)
     # Meta-parameters
-    BLOCK_SIZE_N: tl.constexpr, # Block size for N dimension
+    BLOCK_SIZE_C: tl.constexpr, # Block size for C dimension
     UPDATE_CACHE: tl.constexpr,
 ):
     """
-    Quantizes delta (x - base) to 1-bit.
-    Packs into 1-bit representation using sign. Scale is calculated using rank-K or rank-1 approximation INSIDE kernel.
+    Quantizes delta (x - base) to 1-bit. Input/Output layout (N, C).
+    Packs into 1-bit representation along C dim. Output packed layout (N, C//8).
+    Scale factors U(N, K), V(C, K) are provided.
+    Scale is calculated as dot(U[n,:], V[c,:]) INSIDE kernel if UPDATE_CACHE.
     Optionally updates base cache.
-    Grid: (CHANNEL, cdiv(N_TOKENS, BLOCK_SIZE_N))
+    Grid: (N_ROWS, cdiv(C_COLS, BLOCK_SIZE_C))
     """
-    pid_c = tl.program_id(0); pid_n_block = tl.program_id(1)
-    n_block_start = pid_n_block * BLOCK_SIZE_N
-    offs_n = n_block_start + tl.arange(0, BLOCK_SIZE_N)
-    mask_n = offs_n < N_TOKENS
+    pid_n = tl.program_id(0); pid_c_block = tl.program_id(1)
+    c_block_start = pid_c_block * BLOCK_SIZE_C
+    offs_c = c_block_start + tl.arange(0, BLOCK_SIZE_C)
+    mask_c = offs_c < C_COLS
 
-    # --- Load Inputs ---
-    x_row_ptr = x_ptr + pid_c * stride_xc
-    base_row_ptr = base_ptr + pid_c * stride_bc
-    x_block = tl.load(x_row_ptr + offs_n * stride_xn, mask=mask_n, other=0.0)
-    base_block = tl.load(base_row_ptr + offs_n * stride_bn, mask=mask_n, other=0.0)
+    # --- Load Inputs (Row pid_n, Block of C) --- 
+    x_row_ptr = x_ptr + pid_n * stride_xn
+    base_row_ptr = base_ptr + pid_n * stride_bn
+    x_block = tl.load(x_row_ptr + offs_c * stride_xc, mask=mask_c, other=0.0) # (BLOCK_SIZE_C,)
+    base_block = tl.load(base_row_ptr + offs_c * stride_bc, mask=mask_c, other=0.0) # (BLOCK_SIZE_C,)
 
     # --- Calculate Tensor to Quantize (Always delta) ---
-    tensor_to_quantize = x_block - base_block
+    tensor_to_quantize = x_block - base_block # (BLOCK_SIZE_C,)
 
-    # --- Quantize (Pack Signs) ---
-    binary = (tensor_to_quantize >= 0).to(tl.uint8)
-    binary_reshaped = tl.reshape(binary, (BLOCK_SIZE_N // 8, 8))
+    # --- Quantize (Pack Signs along C) --- 
+    # Get signs (1 if >=0 else 0) for the block
+    binary = (tensor_to_quantize >= 0).to(tl.uint8) # (BLOCK_SIZE_C,)
+    
+    # Reshape for packing (BLOCK_SIZE_C must be multiple of 8)
+    binary_reshaped = tl.reshape(binary, (BLOCK_SIZE_C // 8, 8))
+    
+    # Create shifts [0, 1, ..., 7]
     shifts = tl.arange(0, 8).to(tl.uint8)
-    shifted = (binary_reshaped << shifts).to(tl.uint8)
-    packed_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8)
+    
+    # Shift and reduce (bitwise OR) to pack 8 bits into uint8
+    shifted = (binary_reshaped << shifts).to(tl.uint8) # (BLOCK_SIZE_C//8, 8)
+    packed_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8) # (BLOCK_SIZE_C//8,)
 
-    # --- Store Packed Block ---
-    n8_block_start = n_block_start // 8
-    offs_n8 = n8_block_start + tl.arange(0, BLOCK_SIZE_N // 8)
-    mask_n8 = offs_n8 < N_TOKENS_8
-    packed_output_base_ptr = packed_out_ptr + pid_c * stride_packed_c
-    packed_output_ptrs = packed_output_base_ptr + offs_n8 * stride_packed_n8
-    tl.store(packed_output_ptrs, packed_block, mask=mask_n8)
+    # --- Store Packed Block --- 
+    # Calculate offsets in the packed dimension C//8
+    c8_block_start = c_block_start // 8
+    offs_c8 = c8_block_start + tl.arange(0, BLOCK_SIZE_C // 8)
+    mask_c8 = offs_c8 < C_COLS_8
+    
+    # Get base pointer for the output row
+    packed_output_row_ptr = packed_out_ptr + pid_n * stride_packed_n
+    # Calculate full pointer offsets for the packed block
+    packed_output_ptrs = packed_output_row_ptr + offs_c8 * stride_packed_c8
+    # Store the packed result
+    tl.store(packed_output_ptrs, packed_block, mask=mask_c8)
 
-    # --- Update Cache (Conditional) ---
+    # --- Update Cache (Conditional) --- 
     if UPDATE_CACHE:
-        # --- Load Scale Components (Rank-K or Rank-1) ---
+        # --- Load Scale Components U(N, K), V(C, K) --- 
         offs_k = tl.arange(0, RANK)
-        # Load U vector for current channel pid_c: shape (K,) or (1,)
-        scale_u_ptr_base = scale_u_ptr + pid_c * stride_scale_uc
-        scale_u_vec = tl.load(scale_u_ptr_base + offs_k * stride_scale_uk) # (RANK,)
+        
+        # Load U vector for current row pid_n: shape (K,)
+        scale_u_row_ptr = scale_u_ptr + pid_n * stride_scale_un
+        scale_u_vec = tl.load(scale_u_row_ptr + offs_k * stride_scale_uk) # (RANK,)
 
-        # Load V block for current N block: shape (RANK, BLOCK_SIZE_N) from V (K, N or 1, N)
-        offs_n_masked = n_block_start + tl.arange(0, BLOCK_SIZE_N)
-        # Correct broadcasting for V offsets: (K, 1) for k_offsets, (1, BLOCK_SIZE_N) for n_offsets
-        # V layout is (K, N), stride_scale_vk = stride K dim, stride_scale_vn = stride N dim
-        offs_v = offs_k[:, None] * stride_scale_vk + offs_n_masked[None, :] * stride_scale_vn # <<< CHANGED Calculation
-        mask_v = mask_n[None, :] & (offs_k[:, None] < RANK) # Shape (RANK, BLOCK_SIZE_N)
-        scale_v_block = tl.load(scale_v_ptr + offs_v, mask=mask_v, other=0.0) # (RANK, BLOCK_SIZE_N)
+        # Load V block for current C block: shape (BLOCK_SIZE_C, RANK)
+        # Pointer starts at C block start
+        v_block_start_ptr = scale_v_ptr + c_block_start * stride_scale_vc
+        # Offsets: (BLOCK_SIZE_C, 1) * stride_vc + (1, RANK) * stride_vk
+        offs_v = tl.arange(0, BLOCK_SIZE_C)[:, None] * stride_scale_vc + offs_k[None, :] * stride_scale_vk
+        # Mask for V load: (BLOCK_SIZE_C, 1) & (1, RANK)
+        mask_v = mask_c[:, None] & (offs_k[None, :] < RANK)
+        scale_v_block = tl.load(v_block_start_ptr + offs_v, mask=mask_v, other=0.0) # (BLOCK_SIZE_C, RANK)
 
-        # --- Calculate Scale (Rank-K or Rank-1 dot product) ---
-        # scale = dot(u_k, v_k) -> sum(u_k * v_k)
-        # If RANK=1, this is just u[0] * v[0, :] which is mean_scale * 1.0
-        scale_block = tl.sum(scale_u_vec[:, None] * scale_v_block, axis=0).to(tl.float16) # (BLOCK_SIZE_N,)
+        # --- Calculate Scale: dot(U[n,:], V[c,:]) -> sum(U[n,k] * V[c,k]) --- 
+        # We have U_vec (RANK,) and V_block (BLOCK_SIZE_C, RANK)
+        # Need element-wise product and sum over K
+        # scale_block[c] = sum_k ( scale_u_vec[k] * scale_v_block[c, k] )
+        scale_block = tl.sum(scale_u_vec[None, :] * scale_v_block, axis=1).to(tl.float16) # (BLOCK_SIZE_C,)
 
-        # Dequantize based on the `binary` block
-        sign_int8 = tl.where(mask_n, (2 * binary.to(tl.int8) - 1), 0)
+        # Dequantize based on the `binary` block (0/1 values)
+        sign_int8 = tl.where(mask_c, (2 * binary.to(tl.int8) - 1), 0) # (BLOCK_SIZE_C,)
         recv_quantized_block = sign_int8 * scale_block # This is recv_delta
 
         # Calculate new base
         new_base_block = base_block + recv_quantized_block # new_base = base + recv_delta
 
-        # Store new base
-        new_base_row_ptr = new_base_ptr + pid_c * stride_newb_c
-        tl.store(new_base_row_ptr + offs_n * stride_newb_n, new_base_block, mask=mask_n)
+        # Store new base (Row pid_n, Block of C)
+        new_base_row_ptr = new_base_ptr + pid_n * stride_newb_n
+        tl.store(new_base_row_ptr + offs_c * stride_newb_c, new_base_block, mask=mask_c)
 
 
 @Profiler.prof_func("compact.binary_quant_fastpath")
 def binary_quant_fastpath(
-    x_tensor_cn: torch.Tensor,        # Input (C, N)
-    base_tensor_cn: torch.Tensor,     # Input (C, N)
+    x_tensor_nc: torch.Tensor,        # Input (N, C)
+    base_tensor_nc: torch.Tensor,     # Input (N, C)
     rank: int,                        # Rank K or -1 for channel-wise mean
     update_cache: bool,
 ):
     """
-    Quantizes delta (x - base) to 1-bit using fast path kernel.
-    Calculates Rank-K scale factors U(C,K), V(K,N) OR channel-wise mean scale (if rank=-1).
-    Passes scales to kernel for internal scale calculation.
-    Returns: packed(C, N//8), scale_u(C,K or C,1), scale_v(K,N or 1,N), new_base(C,N)|None
+    Quantizes delta (x - base) to 1-bit using fast path kernel. Input/Output (N, C).
+    Calculates Rank-K scale factors U(N,K), V(C,K) OR channel-wise mean scale (if rank=-1).
+    Passes scales U(N, K), V(C, K) to kernel.
+    Returns: packed(N, C//8), scale_u(N,K or N,1), scale_v(C,K or C,1), new_base(N,C)|None
     """
     # Assertions
     assert rank >= 1 or rank == -1, "Rank must be >= 1 or -1"
-    assert x_tensor_cn.dtype == torch.half
-    assert base_tensor_cn.dtype == torch.half
-    assert x_tensor_cn.ndim == 2 and base_tensor_cn.ndim == 2
-    assert x_tensor_cn.shape == base_tensor_cn.shape
-    assert x_tensor_cn.is_cuda and base_tensor_cn.is_cuda
+    assert x_tensor_nc.dtype == torch.half
+    assert base_tensor_nc.dtype == torch.half
+    assert x_tensor_nc.ndim == 2 and base_tensor_nc.ndim == 2
+    assert x_tensor_nc.shape == base_tensor_nc.shape
+    assert x_tensor_nc.is_cuda and base_tensor_nc.is_cuda
 
 
-    x_tensor_cn = x_tensor_cn.contiguous()
-    base_tensor_cn = base_tensor_cn.contiguous()
+    x_tensor_nc = x_tensor_nc.contiguous()
+    base_tensor_nc = base_tensor_nc.contiguous()
 
-    CHANNEL, N_TOKENS = x_tensor_cn.shape
-    assert N_TOKENS % 8 == 0, "N_TOKENS must be divisible by 8 for packing output alignment"
-    N_TOKENS_8 = N_TOKENS // 8
+    N_ROWS, C_COLS = x_tensor_nc.shape
+    assert C_COLS % 8 == 0, "C_COLS must be divisible by 8 for packing output alignment"
+    C_COLS_8 = C_COLS // 8
 
     # Calculate tensor to quantize (Always delta)
-    tensor_to_quantize_cn = x_tensor_cn - base_tensor_cn
+    tensor_to_quantize_nc = x_tensor_nc - base_tensor_nc
 
-    # --- Scale Calculation ---
+    # --- Scale Calculation (U(N, K), V(C, K)) --- 
+    tensor_to_quantize_abs_nc = torch.abs(tensor_to_quantize_nc)
+
     if rank == -1:
         # Calculate channel-wise mean scale
         with Profiler.scope("compact.quant.scale_channel_mean"):
-            # Scale is the mean of absolute values per channel
-            mean_scale_c1 = torch.mean(torch.abs(tensor_to_quantize_cn), dim=1, keepdim=True)
-        # Prepare rank-1 structure for the kernel: U = mean_scale, V = ones
-        scale_u_output_ck = mean_scale_c1.contiguous().to(torch.half) # Shape (C, 1)
-        scale_v_output_kn = torch.ones((1, N_TOKENS), device=x_tensor_cn.device, dtype=torch.half) # Shape (1, N)
+            # Scale is the mean of absolute values per channel -> (C,)
+            mean_scale_c = torch.mean(tensor_to_quantize_abs_nc, dim=0)
+        # Prepare rank-1 structure for the kernel: U(N, 1) = ones, V(C, 1) = mean_scale.T
+        scale_u_output_nk = torch.ones((N_ROWS, 1), device=x_tensor_nc.device, dtype=torch.half) # Shape (N, 1)
+        scale_v_output_ck = mean_scale_c.unsqueeze(1).contiguous().to(torch.half) # Shape (C, 1)
         effective_rank = 1 # Kernel needs rank >= 1 for its loop
-    else:
+    else: # rank >= 1
         # Calculate rank-K approximation for scale based on abs(tensor_to_quantize)
+        # subspace_iter(N, C) returns U(N, K), V_t(K, C)
         with Profiler.scope(f"compact.quant.scale_rank{rank}_approx"):
-            scale_U_ck, scale_V_t_kn, _ = subspace_iter(
-                torch.abs(tensor_to_quantize_cn), rank=rank, num_iters=2
+            scale_U_nk, scale_V_t_kc, _ = subspace_iter(
+                tensor_to_quantize_abs_nc, rank=rank, num_iters=2
             )
-        # Kernel expects U(C, K) and V(K, N)
-        scale_u_output_ck = scale_U_ck.contiguous().to(torch.half)       # Shape (C, K)
-        scale_v_output_kn = scale_V_t_kn.contiguous().to(torch.half) # Shape (K, N)
+        # Kernel expects U(N, K) and V(C, K)
+        scale_u_output_nk = scale_U_nk.contiguous().to(torch.half)       # Shape (N, K)
+        scale_v_output_ck = scale_V_t_kc.transpose(0, 1).contiguous().to(torch.half) # Shape (C, K)
         effective_rank = rank
-        assert scale_u_output_ck.shape == (CHANNEL, rank)
-        assert scale_v_output_kn.shape == (rank, N_TOKENS)
+        assert scale_u_output_nk.shape == (N_ROWS, rank)
+        assert scale_v_output_ck.shape == (C_COLS, rank)
 
 
     # Allocate outputs
-    packed_output = torch.empty((CHANNEL, N_TOKENS_8), dtype=torch.uint8, device=x_tensor_cn.device)
-    new_base_output_cn = torch.empty_like(x_tensor_cn) if update_cache else None
+    packed_output = torch.empty((N_ROWS, C_COLS_8), dtype=torch.uint8, device=x_tensor_nc.device)
+    new_base_output_nc = torch.empty_like(x_tensor_nc) if update_cache else None
 
-    BLOCK_SIZE_N = 512
-    assert BLOCK_SIZE_N % 8 == 0, "BLOCK_SIZE_N must be divisible by 8"
-    grid = (CHANNEL, triton.cdiv(N_TOKENS, BLOCK_SIZE_N))
+    BLOCK_SIZE_C = 512
+    assert BLOCK_SIZE_C % 8 == 0, "BLOCK_SIZE_C must be divisible by 8"
+    grid = (N_ROWS, triton.cdiv(C_COLS, BLOCK_SIZE_C))
 
     # Prepare dummy pointers/strides if not used
-    dummy_tensor = x_tensor_cn # Use existing tensor for properties
+    dummy_tensor = x_tensor_nc # Use existing tensor for properties
 
     # New base pointers/strides (dummy if not update_cache)
-    new_base_ptr = new_base_output_cn if update_cache else dummy_tensor
-    stride_newb_c = new_base_ptr.stride(0) if update_cache else 0
-    stride_newb_n = new_base_ptr.stride(1) if update_cache else 0
+    new_base_ptr = new_base_output_nc if update_cache else dummy_tensor
+    stride_newb_n = new_base_ptr.stride(0) if update_cache else 0 # Stride for N dim
+    stride_newb_c = new_base_ptr.stride(1) if update_cache else 0 # Stride for C dim
 
 
     with Profiler.scope("compact._binary_quant_fastpath"):
          _binary_quant_fastpath[grid](
-             x_tensor_cn, base_tensor_cn,
-             scale_u_output_ck, scale_v_output_kn, # Pass calculated U and V
+             x_tensor_nc, base_tensor_nc,
+             scale_u_output_nk, scale_v_output_ck, # Pass calculated U(N,K) and V(C,K)
              packed_output,
              new_base_ptr,
              # --- Dimensions (Passed as constexpr) ---
-             N_TOKENS=N_TOKENS, CHANNEL=CHANNEL, N_TOKENS_8=N_TOKENS_8,
+             N_ROWS=N_ROWS, C_COLS=C_COLS, C_COLS_8=C_COLS_8,
              RANK=effective_rank, # Pass the effective rank (1 for mean, K for subspace)
-             # --- Strides ---
-             stride_xc=x_tensor_cn.stride(0), stride_xn=x_tensor_cn.stride(1),
-             stride_bc=base_tensor_cn.stride(0), stride_bn=base_tensor_cn.stride(1),
-             stride_scale_uc=scale_u_output_ck.stride(0), stride_scale_uk=scale_u_output_ck.stride(1),
-             stride_scale_vk=scale_v_output_kn.stride(0), stride_scale_vn=scale_v_output_kn.stride(1),
-             stride_packed_c=packed_output.stride(0), stride_packed_n8=packed_output.stride(1),
-             stride_newb_c=stride_newb_c, stride_newb_n=stride_newb_n,
+             # --- Strides (N, C Layout) ---
+             stride_xn=x_tensor_nc.stride(0), stride_xc=x_tensor_nc.stride(1),
+             stride_bn=base_tensor_nc.stride(0), stride_bc=base_tensor_nc.stride(1),
+             stride_scale_un=scale_u_output_nk.stride(0), stride_scale_uk=scale_u_output_nk.stride(1),
+             stride_scale_vc=scale_v_output_ck.stride(0), stride_scale_vk=scale_v_output_ck.stride(1),
+             stride_packed_n=packed_output.stride(0), stride_packed_c8=packed_output.stride(1),
+             stride_newb_n=stride_newb_n, stride_newb_c=stride_newb_c,
              # --- Meta-parameters (Passed as constexpr) ---
-             BLOCK_SIZE_N=BLOCK_SIZE_N,
+             BLOCK_SIZE_C=BLOCK_SIZE_C,
              UPDATE_CACHE=update_cache,
          )
 
     # Return values based on update_cache flag
     if update_cache:
-        # Return 4 values: packed, u, v, new_base
-        return packed_output, scale_u_output_ck, scale_v_output_kn, new_base_output_cn
+        # Return 4 values: packed(N,C//8), u(N,K), v(C,K), new_base(N,C)
+        return packed_output, scale_u_output_nk, scale_v_output_ck, new_base_output_nc
     else:
         # Always return 4 values, but last one is None if not update_cache
-        return packed_output, scale_u_output_ck, scale_v_output_kn, None
+        return packed_output, scale_u_output_nk, scale_v_output_ck, None
 
 # --- Simulation Functions ---
 
-# Helper for manual packing in simulation
-def pack_bits_cn_to_cn8(binary_tensor_cn):
-    """ Manually packs a C,N boolean/int tensor to C,N//8 uint8 tensor. """
-    C, N = binary_tensor_cn.shape
-    assert N % 8 == 0
-    N_8 = N // 8
-    binary_tensor_cn = binary_tensor_cn.to(torch.uint8).contiguous()
-    # Reshape to (C, N//8, 8)
-    binary_reshaped = binary_tensor_cn.view(C, N_8, 8)
-    # Create shifts (0 to 7)
-    shifts = torch.arange(0, 8, device=binary_tensor_cn.device, dtype=torch.uint8)
-    # Apply shifts and sum (equivalent to bitwise OR)
-    packed_cn8 = torch.sum(binary_reshaped << shifts, dim=2, dtype=torch.uint8)
-    return packed_cn8
-
-# Helper for manual unpacking in simulation
-def unpack_bits_cn8_to_cn(packed_tensor_cn8, N):
-    """ Manually unpacks a C,N//8 uint8 tensor to a C,N boolean tensor. """
-    C, N_8 = packed_tensor_cn8.shape
-    assert N == N_8 * 8
-    packed_tensor_cn8 = packed_tensor_cn8.contiguous()
-    # Create shifts
-    shifts = torch.arange(0, 8, device=packed_tensor_cn8.device, dtype=torch.uint8)
-    # Unpack using broadcasting and bitwise AND
-    # Expand packed tensor: (C, N//8, 1)
-    # Expand shifts: (1, 1, 8)
-    # Resulting unpacked shape: (C, N//8, 8)
-    unpacked_bits = ((packed_tensor_cn8.unsqueeze(-1) >> shifts) & 1).to(torch.bool)
-    # Reshape back to (C, N)
-    binary_cn = unpacked_bits.view(C, N)
-    return binary_cn
-
-
 # Simulation uses slowpath quant/dequant OR manual packing/scaling for rank=-1
 def sim_binary_quant_fastpath(
-    x_tensor_cn: torch.Tensor,        # Input (C, N)
-    base_tensor_cn: torch.Tensor,     # Input (C, N)
+    x_tensor_nc: torch.Tensor,        # Input (N, C)
+    base_tensor_nc: torch.Tensor,     # Input (N, C)
     rank: int,
     update_cache: bool,
 ):
     """
     Simulated version of binary_quant_fastpath.
-    Uses manual packing/scaling for rank=-1.
-    Uses slowpath quantize_1bit for rank > 0.
-    Returns: packed(C, N//8), scale_u(C,K or C,1), scale_v(K,N or 1,N), new_base(C,N)|None
+    Uses slowpath quantize_1bit/dequantize_1bit internally, which handle N,C layout and rank=-1.
+    Returns: packed(N, C//8), scale_u(N,K or N,1), scale_v(C,K or C,1), new_base(N,C)|None
     """
     assert rank >= 1 or rank == -1, "Rank must be >= 1 or -1"
 
-    C, N = x_tensor_cn.shape
-    new_base_cn = None
+    N, C = x_tensor_nc.shape
+    new_base_nc = None
 
     # Calculate tensor to quantize (Always delta)
-    tensor_to_quantize_cn = x_tensor_cn - base_tensor_cn
+    tensor_to_quantize_nc = x_tensor_nc - base_tensor_nc
 
-    if rank == -1:
-        # --- Simulate Channel-wise Mean Scaling ---
-        with Profiler.scope("compact.sim_quant.scale_channel_mean"):
-            mean_scale_c1 = torch.mean(torch.abs(tensor_to_quantize_cn), dim=1, keepdim=True)
+    # Use slowpath quantize_1bit - it now handles N,C layout and rank=-1
+    # It returns packed(N, C//8), u(N, K or N, 1), v(K, C or 1, C)
+    with Profiler.scope("compact.sim_quant.slowpath_quantize_1bit"):
+        packed_sim, scale_u_nk, scale_v_kc = quantize_1bit(tensor_to_quantize_nc, rank=rank)
 
-        # Scales to return, matching fastpath signature for rank=-1
-        scale_u_output_ck_sim = mean_scale_c1.contiguous().to(torch.half) # Shape (C, 1)
-        scale_v_output_kn_sim = torch.ones((1, N), device=x_tensor_cn.device, dtype=torch.half) # Shape (1, N)
+    # Determine the scales to return, matching the fastpath wrapper's expected V(C, K) layout
+    # scale_v_kc from quantize_1bit is (K, C) or (1, C). We need (C, K) or (C, 1)
+    scale_v_output_ck_sim = scale_v_kc.transpose(0, 1).contiguous() # Shape (C, K) or (C, 1)
+    scale_u_output_nk_sim = scale_u_nk # Already (N, K) or (N, 1)
 
-        # Manual Quantization (Packing)
-        with Profiler.scope("compact.sim_quant.manual_pack"):
-            binary_cn = (tensor_to_quantize_cn >= 0)
-            packed_sim = pack_bits_cn_to_cn8(binary_cn) # Manually pack
+    if update_cache:
+        # --- Perform Dequantization using slowpath dequantize_1bit --- 
+        # It expects packed(N,C//8), u(N,K), v(K,C) and returns N,C
+        with Profiler.scope("compact.sim_quant.slowpath_dequantize_1bit"):
+            # Use the scales directly from the quantize_1bit call
+            recv_quantized_nc = dequantize_1bit(packed_sim, scale_u_nk, scale_v_kc)
 
-        if update_cache:
-            # Manual Dequantization (for new_base calculation)
-            with Profiler.scope("compact.sim_quant.manual_dequant"):
-                signs_cn = torch.where(binary_cn, 1, -1).to(torch.int8)
-                # Use the calculated mean scale for reconstruction
-                recv_quantized_cn = signs_cn * scale_u_output_ck_sim # (C,N) * (C,1) -> (C,N)
-                new_base_cn = base_tensor_cn + recv_quantized_cn.to(base_tensor_cn.dtype)
+        # Calculate new base
+        new_base_nc = base_tensor_nc + recv_quantized_nc
 
-    else: # rank > 0
-        # --- Simulate Rank-K Scaling using subspace_iter and quantize_1bit ---
-        # Calculate Scales U(C,K), V(K,N) ONCE to match fastpath wrapper output
-        with Profiler.scope(f"compact.sim_quant.scale_rank{rank}_approx"):
-            scale_U_ck_sim, scale_V_t_kn_sim, _ = subspace_iter(
-                torch.abs(tensor_to_quantize_cn), rank=rank, num_iters=2
-            )
-        # These are the scales returned, matching the fastpath signature
-        scale_u_output_ck_sim = scale_U_ck_sim.contiguous().to(torch.half)       # Shape (C, K)
-        scale_v_output_kn_sim = scale_V_t_kn_sim.contiguous().to(torch.half) # Shape (K, N)
-
-        # Perform Quantization using slowpath quantize_1bit (ONLY for packed_sim)
-        # We ignore the scales returned by slowpath quantize_1bit as we return the ones above
-        with Profiler.scope("compact.sim_quant.slowpath_quantize_1bit"):
-            tensor_to_quantize_nc = tensor_to_quantize_cn.transpose(0, 1).contiguous()
-            # Note: quantize_1bit internally calculates its own scales based on the input tensor
-            packed_sim, _, _ = quantize_1bit(tensor_to_quantize_nc.to(torch.float16), rank=rank)
-
-        if update_cache:
-            # --- Perform Dequantization using slowpath dequantize_1bit ---
-            # Prepare scales for slowpath dequantize_1bit: u_nk, v_kc
-            # Use the scales calculated above (identically to the fastpath wrapper)
-            # We have U(C,K) and V(K,N). Slowpath needs U(N,K) and V(K,C).
-            # u_nk_slowpath = V.T, v_kc_slowpath = U.T
-            with Profiler.scope("compact.sim_quant.slowpath_dequantize_1bit"):
-                u_nk_for_slowpath = scale_v_output_kn_sim.transpose(0, 1).contiguous() # Shape (N, K)
-                v_kc_for_slowpath = scale_u_output_ck_sim.transpose(0, 1).contiguous() # Shape (K, C)
-
-                recv_quantized_nc = dequantize_1bit(packed_sim, u_nk_for_slowpath, v_kc_for_slowpath)
-                recv_quantized_cn = recv_quantized_nc.transpose(0, 1).contiguous().to(torch.float16)
-
-            # Calculate new base (Always level 1)
-            new_base_cn = base_tensor_cn + recv_quantized_cn
-
-    # Return values matching fastpath signature: packed, scale_u, scale_v, new_base
-    return packed_sim, scale_u_output_ck_sim, scale_v_output_kn_sim, new_base_cn
+    # Return values matching fastpath signature: packed(N,C//8), u(N,K), v(C,K), new_base(N,C)
+    return packed_sim, scale_u_output_nk_sim, scale_v_output_ck_sim, new_base_nc
 
 
 @triton.jit
 def _binary_dequant_fastpath(
     # Input Pointers
-    packed_in_ptr,     # Packed delta (C, N//8) uint8
-    scale_u_ptr,       # Scale factor u (C, K or C, 1)
-    scale_v_ptr,       # Scale factor v (K, N or 1, N)
-    base_ptr,          # Base cache (C, N) half
+    packed_in_ptr,     # Packed delta (N, C//8) uint8
+    scale_u_ptr,       # Scale factor u (N, K)
+    scale_v_ptr,       # Scale factor v (C, K)
+    base_ptr,          # Base cache (N, C) half
     # Output Pointers
-    recon_ptr,         # Output reconstructed activation (C, N) half
+    recon_ptr,         # Output reconstructed activation (N, C) half
     # Dimensions
-    N_TOKENS: tl.constexpr, # Original N
-    CHANNEL: tl.constexpr,  # Original C
-    N_TOKENS_8: tl.constexpr, # N_TOKENS // 8
-    RANK: tl.constexpr,      # Effective rank (1 for mean, K for subspace)
+    N_ROWS: tl.constexpr,    # Original N
+    C_COLS: tl.constexpr,    # Original C
+    C_COLS_8: tl.constexpr,  # C_COLS // 8
+    RANK: tl.constexpr,       # Effective rank K
     # Strides
-    stride_packed_c, stride_packed_n8,
-    stride_scale_uc, stride_scale_uk, # Strides for U (C, K or C, 1)
-    stride_scale_vk, stride_scale_vn, # Strides for V (K, N or 1, N)
-    stride_base_c, stride_base_n,
-    stride_recon_c, stride_recon_n,
+    stride_packed_n, stride_packed_c8,
+    stride_scale_un, stride_scale_uk, # Strides for U (N, K)
+    stride_scale_vc, stride_scale_vk, # Strides for V (C, K)
+    stride_base_n, stride_base_c,
+    stride_recon_n, stride_recon_c,
     # Meta-parameters
-    BLOCK_SIZE_N: tl.constexpr, # Block size for N dimension
+    BLOCK_SIZE_C: tl.constexpr, # Block size for C dimension
 ):
     """
-    Dequantizes delta and calculates reconstructed activation (base + recv_delta) using rank-K scale calculated INSIDE kernel.
-    RANK is the effective rank passed by the wrapper (1 for channel-wise mean, K for subspace).
-    Grid: (CHANNEL, cdiv(N_TOKENS, BLOCK_SIZE_N))
+    Dequantizes delta (packed along C dim) and calculates reconstructed activation (base + recv_delta).
+    Scale factors U(N, K), V(C, K) are provided. Scale calculation dot(U[n,:], V[c,:]) happens INSIDE the kernel.
+    Input: packed(N, C//8), u(N,K), v(C,K), base(N,C)
+    Output: reconstructed(N, C)
+    Grid: (N_ROWS, cdiv(C_COLS, BLOCK_SIZE_C))
     """
-    pid_c = tl.program_id(0); pid_n_block = tl.program_id(1)
-    n_block_start = pid_n_block * BLOCK_SIZE_N
-    offs_n = n_block_start + tl.arange(0, BLOCK_SIZE_N)
-    mask_n = offs_n < N_TOKENS
+    pid_n = tl.program_id(0); pid_c_block = tl.program_id(1)
+    c_block_start = pid_c_block * BLOCK_SIZE_C
+    offs_c = c_block_start + tl.arange(0, BLOCK_SIZE_C)
+    mask_c = offs_c < C_COLS
 
-    # --- Dequantize Block ---
-    # --- Load Scale Components ---
-    offs_k = tl.arange(0, RANK) # Loop uses effective rank
-    # Load U vector for current channel pid_c: shape (K,) or (1,)
-    # Stride uk might be 0 if RANK=1
-    scale_u_ptr_base = scale_u_ptr + pid_c * stride_scale_uc
-    scale_u_vec = tl.load(scale_u_ptr_base + offs_k * stride_scale_uk) # (RANK,)
+    # --- Dequantize Block --- 
+    # --- Load Scale Components U(N, K), V(C, K) --- 
+    offs_k = tl.arange(0, RANK)
+    
+    # Load U vector for current row pid_n: shape (K,)
+    scale_u_row_ptr = scale_u_ptr + pid_n * stride_scale_un
+    scale_u_vec = tl.load(scale_u_row_ptr + offs_k * stride_scale_uk) # (RANK,)
 
-    # Load V block for current N block: shape (RANK, BLOCK_SIZE_N)
-    offs_n_masked = n_block_start + tl.arange(0, BLOCK_SIZE_N)
-    # V layout is (RANK, N), stride_scale_vk = stride K dim, stride_scale_vn = stride N dim
-    # Stride vk might be 0 if RANK=1
-    offs_v = offs_k[:, None] * stride_scale_vk + offs_n_masked[None, :] * stride_scale_vn
-    mask_v = mask_n[None, :] & (offs_k[:, None] < RANK) # Shape (RANK, BLOCK_SIZE_N)
-    scale_v_block = tl.load(scale_v_ptr + offs_v, mask=mask_v, other=0.0) # (RANK, BLOCK_SIZE_N)
+    # Load V block for current C block: shape (BLOCK_SIZE_C, RANK)
+    v_block_start_ptr = scale_v_ptr + c_block_start * stride_scale_vc
+    # Offsets: (BLOCK_SIZE_C, 1) * stride_vc + (1, RANK) * stride_vk
+    offs_v = tl.arange(0, BLOCK_SIZE_C)[:, None] * stride_scale_vc + offs_k[None, :] * stride_scale_vk
+    # Mask for V load: (BLOCK_SIZE_C, 1) & (1, RANK)
+    mask_v = mask_c[:, None] & (offs_k[None, :] < RANK)
+    scale_v_block = tl.load(v_block_start_ptr + offs_v, mask=mask_v, other=0.0) # (BLOCK_SIZE_C, RANK)
 
-    # --- Calculate Scale (Rank-K or Rank-1 dot product) ---
-    # scale = dot(u_k, v_k) -> sum(u_k * v_k)
-    # If RANK=1, this is just u[0] * v[0, :] which is mean_scale * 1.0
-    scale_block = tl.sum(scale_u_vec[:, None] * scale_v_block, axis=0).to(tl.float16) # (BLOCK_SIZE_N,)
+    # --- Calculate Scale: dot(U[n,:], V[c,:]) -> sum(U[n,k] * V[c,k]) --- 
+    scale_block = tl.sum(scale_u_vec[None, :] * scale_v_block, axis=1).to(tl.float16) # (BLOCK_SIZE_C,)
 
-    # Load and unpack bits
-    n8_block_start = n_block_start // 8
-    offs_n8 = n8_block_start + tl.arange(0, BLOCK_SIZE_N // 8)
-    mask_n8 = offs_n8 < N_TOKENS_8
-    packed_row_ptr = packed_in_ptr + pid_c * stride_packed_c
-    # Corrected unpacking: Load bytes corresponding to offs_n, then extract bits
-    byte_indices_in_row = offs_n // 8
-    bit_indices_in_byte = offs_n % 8
-    final_byte_mask = mask_n & (byte_indices_in_row < N_TOKENS_8) # Mask for valid bytes within N
-    packed_bytes_for_elems = tl.load(packed_row_ptr + byte_indices_in_row * stride_packed_n8, mask=final_byte_mask, other=0)
+    # --- Load and unpack bits (packed along C) --- 
+    c8_block_start = c_block_start // 8
+    offs_c8 = c8_block_start + tl.arange(0, BLOCK_SIZE_C // 8)
+    mask_c8 = offs_c8 < C_COLS_8
+    
+    # Load packed bytes for the current row
+    packed_row_ptr = packed_in_ptr + pid_n * stride_packed_n
+    
+    # Map unpacked C offsets back to packed C//8 offsets
+    byte_indices_in_row = offs_c // 8
+    bit_indices_in_byte = offs_c % 8
+    
+    # Create mask for loading packed bytes (only need bytes relevant to current C block)
+    # Use mask_c to determine valid elements, then find corresponding byte indices
+    final_byte_mask = mask_c & (byte_indices_in_row < C_COLS_8) # Ensure byte index is valid
+    
+    # Load the necessary packed bytes. Need to handle potential non-contiguous loads efficiently.
+    # A simple approach (might be less efficient): load all bytes corresponding to the C block elements
+    packed_bytes_for_elems = tl.load(packed_row_ptr + byte_indices_in_row * stride_packed_c8, 
+                                       mask=final_byte_mask, other=0)
+                                       
+    # Extract the correct bit for each element in the C block
     bits = ((packed_bytes_for_elems >> bit_indices_in_byte) & 1)
 
-    # --- Calculate Reconstructed Delta ---
-    signs = tl.where(mask_n, (2 * bits - 1).to(tl.int8), 0)
-    recv_quantized_block = signs * scale_block # This is recv_delta
+    # --- Calculate Reconstructed Delta --- 
+    signs = tl.where(mask_c, (2 * bits - 1).to(tl.int8), 0) # Get (+1/-1) signs
+    recv_quantized_block = signs * scale_block # This is recv_delta (BLOCK_SIZE_C,)
 
-    # --- Load Base ---
-    base_row_ptr = base_ptr + pid_c * stride_base_c
-    base_block = tl.load(base_row_ptr + offs_n * stride_base_n, mask=mask_n, other=0.0)
+    # --- Load Base --- 
+    base_row_ptr = base_ptr + pid_n * stride_base_n
+    base_block = tl.load(base_row_ptr + offs_c * stride_base_c, mask=mask_c, other=0.0) # (BLOCK_SIZE_C,)
 
-    # --- Calculate Output Block (Always level 1) ---
+    # --- Calculate Output Block (Always level 1) --- 
     recon_block = base_block + recv_quantized_block # recon = base + recv_delta
 
-    # --- Store Output Block ---
-    recon_out_ptr = recon_ptr + pid_c * stride_recon_c
-    tl.store(recon_out_ptr + offs_n * stride_recon_n, recon_block, mask=mask_n)
+    # --- Store Output Block --- 
+    recon_out_row_ptr = recon_ptr + pid_n * stride_recon_n
+    tl.store(recon_out_row_ptr + offs_c * stride_recon_c, recon_block, mask=mask_c)
 
 
 @Profiler.prof_func("compact.binary_dequant_fastpath")
 def binary_dequant_fastpath(
-    packed_in_cn8: torch.Tensor,    # Input packed delta (C, N//8) uint8
-    scale_u_ck: torch.Tensor,       # Input scale u (C, K or C, 1)
-    scale_v_kn: torch.Tensor,       # Input scale v (K, N or 1, N)
-    base_cn: torch.Tensor,         # Input base cache (C, N) half
+    packed_in_nc8: torch.Tensor,    # Input packed delta (N, C//8) uint8
+    scale_u_nk: torch.Tensor,       # Input scale u (N, K)
+    scale_v_ck: torch.Tensor,       # Input scale v (C, K)
+    base_nc: torch.Tensor,         # Input base cache (N, C) half
     # rank: int, # Rank is inferred from scales now
 ):
     """
-    Dequantizes delta and calculates reconstructed activation (base + recv_delta).
-    Scale calculation (U @ V) happens INSIDE the kernel.
-    Handles both rank-K and rank=-1 (channel-wise mean) cases based on scale shapes.
+    Dequantizes delta (packed along C) and calculates reconstructed activation (base + recv_delta).
+    Scale calculation dot(U[n,:], V[c,:]) happens INSIDE the kernel.
+    Handles both rank-K and rank=-1 cases based on scale shapes.
 
-    Input: packed(C, N//8), u(C,K or C,1), v(K,N or 1,N), base(C,N)
-    Output: reconstructed(C, N)
+    Input: packed(N, C//8), u(N,K), v(C,K), base(N,C)
+    Output: reconstructed(N, C)
     """
     # Assertions
-    # assert rank >= 1 or rank == -1, "Rank must be >= 1 or -1" # Rank no longer explicit input
-    assert packed_in_cn8.dtype == torch.uint8
-    assert scale_u_ck.dtype == torch.half and scale_v_kn.dtype == torch.half
-    assert base_cn.dtype == torch.half
-    assert packed_in_cn8.ndim == 2 and scale_u_ck.ndim == 2 and scale_v_kn.ndim == 2 and base_cn.ndim == 2
+    assert packed_in_nc8.dtype == torch.uint8
+    assert scale_u_nk.dtype == torch.half and scale_v_ck.dtype == torch.half
+    assert base_nc.dtype == torch.half
+    assert packed_in_nc8.ndim == 2 and scale_u_nk.ndim == 2 and scale_v_ck.ndim == 2 and base_nc.ndim == 2
 
-    assert packed_in_cn8.is_cuda and scale_u_ck.is_cuda and scale_v_kn.is_cuda and base_cn.is_cuda
+    assert packed_in_nc8.is_cuda and scale_u_nk.is_cuda and scale_v_ck.is_cuda and base_nc.is_cuda
 
-    packed_in_cn8 = packed_in_cn8.contiguous()
-    scale_u_ck = scale_u_ck.contiguous()
-    scale_v_kn = scale_v_kn.contiguous()
-    base_cn = base_cn.contiguous()
+    packed_in_nc8 = packed_in_nc8.contiguous()
+    scale_u_nk = scale_u_nk.contiguous()
+    scale_v_ck = scale_v_ck.contiguous()
+    base_nc = base_nc.contiguous()
 
-    CHANNEL, N_TOKENS_8 = packed_in_cn8.shape
-    N_TOKENS = N_TOKENS_8 * 8
-    effective_rank = scale_u_ck.shape[1] # Infer rank from scale U
+    N_ROWS, C_COLS_8 = packed_in_nc8.shape
+    C_COLS = C_COLS_8 * 8
+    effective_rank = scale_u_nk.shape[1] # Infer rank from scale U
     assert effective_rank >= 1, "Inferred rank from scale_u must be >= 1"
-    assert scale_v_kn.shape[0] == effective_rank, f"Scale V rank mismatch: {scale_v_kn.shape[0]} vs inferred {effective_rank}"
+    assert scale_v_ck.shape[1] == effective_rank, f"Scale V rank mismatch: V K dim {scale_v_ck.shape[1]} vs inferred K {effective_rank}"
+    assert scale_v_ck.shape[0] == C_COLS, f"Scale V C dim mismatch: V C dim {scale_v_ck.shape[0]} vs expected C {C_COLS}"
 
-    assert base_cn.shape == (CHANNEL, N_TOKENS), f"Base shape mismatch: {base_cn.shape} vs expected {(CHANNEL, N_TOKENS)}"
-    assert scale_u_ck.shape == (CHANNEL, effective_rank), f"Scale U shape mismatch: {scale_u_ck.shape} vs expected {(CHANNEL, effective_rank)}"
-    assert scale_v_kn.shape == (effective_rank, N_TOKENS), f"Scale V shape mismatch: {scale_v_kn.shape} vs expected {(effective_rank, N_TOKENS)}"
+    assert base_nc.shape == (N_ROWS, C_COLS), f"Base shape mismatch: {base_nc.shape} vs expected {(N_ROWS, C_COLS)}"
+    assert scale_u_nk.shape == (N_ROWS, effective_rank), f"Scale U shape mismatch: {scale_u_nk.shape} vs expected {(N_ROWS, effective_rank)}"
+    # V shape checked above
 
     # Allocate output tensors
-    reconstructed_output_cn = torch.empty_like(base_cn)
+    reconstructed_output_nc = torch.empty_like(base_nc)
 
-    BLOCK_SIZE_N = 512
-    assert BLOCK_SIZE_N % 8 == 0, "BLOCK_SIZE_N must be divisible by 8 for unpacking logic"
-    grid = (CHANNEL, triton.cdiv(N_TOKENS, BLOCK_SIZE_N))
+    BLOCK_SIZE_C = 512
+    assert BLOCK_SIZE_C % 8 == 0, "BLOCK_SIZE_C must be divisible by 8 for unpacking logic"
+    grid = (N_ROWS, triton.cdiv(C_COLS, BLOCK_SIZE_C))
 
-    # Prepare dummy pointers/strides if not used
-    dummy_tensor = base_cn # Use existing tensor for properties
+    # Prepare dummy pointers/strides if not used (not needed here)
+    # dummy_tensor = base_nc # Use existing tensor for properties
 
     with Profiler.scope("compact._binary_dequant_fastpath"):
         _binary_dequant_fastpath[grid](
-            packed_in_cn8,
-            scale_u_ck, scale_v_kn,
-            base_cn,
-            reconstructed_output_cn,
+            packed_in_nc8,
+            scale_u_nk, scale_v_ck, # Pass U(N,K), V(C,K)
+            base_nc,
+            reconstructed_output_nc,
             # --- Dimensions (Passed as constexpr) ---
-            N_TOKENS=N_TOKENS, CHANNEL=CHANNEL, N_TOKENS_8=N_TOKENS_8,
+            N_ROWS=N_ROWS, C_COLS=C_COLS, C_COLS_8=C_COLS_8,
             RANK=effective_rank, # Pass inferred effective rank
-            # --- Strides ---
-            stride_packed_c=packed_in_cn8.stride(0), stride_packed_n8=packed_in_cn8.stride(1),
-            stride_scale_uc=scale_u_ck.stride(0), stride_scale_uk=scale_u_ck.stride(1),
-            stride_scale_vk=scale_v_kn.stride(0), stride_scale_vn=scale_v_kn.stride(1),
-            stride_base_c=base_cn.stride(0), stride_base_n=base_cn.stride(1),
-            stride_recon_c=reconstructed_output_cn.stride(0), stride_recon_n=reconstructed_output_cn.stride(1),
+            # --- Strides (N, C Layout) ---
+            stride_packed_n=packed_in_nc8.stride(0), stride_packed_c8=packed_in_nc8.stride(1),
+            stride_scale_un=scale_u_nk.stride(0), stride_scale_uk=scale_u_nk.stride(1),
+            stride_scale_vc=scale_v_ck.stride(0), stride_scale_vk=scale_v_ck.stride(1),
+            stride_base_n=base_nc.stride(0), stride_base_c=base_nc.stride(1),
+            stride_recon_n=reconstructed_output_nc.stride(0), stride_recon_c=reconstructed_output_nc.stride(1),
             # --- Meta-parameters (Passed as constexpr) ---
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_C=BLOCK_SIZE_C,
         )
 
     # Return only recon
-    return reconstructed_output_cn
+    return reconstructed_output_nc
 
 # Simulation uses slowpath dequant OR manual dequant for rank=-1
 def sim_binary_dequant_fastpath(
-    packed_in_cn8: torch.Tensor, # Packed bits (C, N//8) UINT8
-    scale_u_ck: torch.Tensor,     # Scale factor U (C, K or C, 1)
-    scale_v_kn: torch.Tensor,     # Scale factor V (K, N or 1, N)
-    base_cn: torch.Tensor,
+    packed_in_nc8: torch.Tensor, # Packed bits (N, C//8) UINT8
+    scale_u_nk: torch.Tensor,     # Scale factor U (N, K or N, 1)
+    scale_v_ck: torch.Tensor,     # Scale factor V (C, K or C, 1)
+    base_nc: torch.Tensor,       # Base (N, C)
     # rank: int, # Rank is inferred
 ):
     """
     Simulated version of binary_dequant_fastpath.
-    Uses the general slowpath dequantize_1bit function based on the provided scales.
-    Handles both rank-K and rank-1 cases correctly.
-    Returns: reconstructed(C,N)
+    Uses the slowpath dequantize_1bit function internally.
+    Handles both rank-K and rank-1 cases based on scale shapes.
+    Input: packed(N, C//8), u(N,K), v(C,K), base(N,C)
+    Returns: reconstructed(N,C)
     """
     # Infer rank from scales
-    effective_rank = scale_u_ck.shape[1]
+    effective_rank = scale_u_nk.shape[1]
     assert effective_rank >= 1, "Inferred rank must be >= 1"
-    assert scale_v_kn.shape[0] == effective_rank, "Scale V rank mismatch"
+    assert scale_v_ck.shape[1] == effective_rank, "Scale V rank mismatch"
 
-    C = scale_u_ck.shape[0]
-    N = scale_v_kn.shape[1]
-    assert packed_in_cn8.shape == (C, N // 8)
-    assert scale_u_ck.shape == (C, effective_rank)
-    assert scale_v_kn.shape == (effective_rank, N)
+    N = scale_u_nk.shape[0]
+    C = scale_v_ck.shape[0]
+    assert packed_in_nc8.shape == (N, C // 8)
+    assert scale_u_nk.shape == (N, effective_rank)
+    assert scale_v_ck.shape == (C, effective_rank)
+    assert base_nc.shape == (N, C)
 
     # --- Always use the slowpath dequantize_1bit for simulation consistency --- 
     # It handles rank=1 correctly when provided with appropriate rank-1 U/V scales.
+    # slowpath dequantize_1bit expects u(N,K) and v(K,C).
+    # We have u(N,K) and v(C,K) from fastpath.
+    # Map: u_nk_slowpath = scale_u_nk, v_kc_slowpath = scale_v_ck.T
     with Profiler.scope("compact.sim_dequant.slowpath_dequantize_1bit"):
-        # slowpath expects u(N,K) and v(K,C).
-        # We have u(C,K) and v(K,N) from fastpath.
-        # Map: u_nk_slowpath = scale_v_kn.T, v_kc_slowpath = scale_u_ck.T
-        u_nk_for_slowpath = scale_v_kn.transpose(0, 1).contiguous() # Shape (N, K)
-        v_kc_for_slowpath = scale_u_ck.transpose(0, 1).contiguous() # Shape (K, C)
+        u_nk_for_slowpath = scale_u_nk # Already (N, K)
+        v_kc_for_slowpath = scale_v_ck.transpose(0, 1).contiguous() # Shape (K, C)
 
-        recv_quantized_nc = dequantize_1bit(packed_in_cn8, u_nk_for_slowpath, v_kc_for_slowpath)
-        recv_quantized_cn = recv_quantized_nc.transpose(0, 1).contiguous().to(torch.float16)
-        reconstructed_cn = base_cn + recv_quantized_cn
+        recv_quantized_nc = dequantize_1bit(packed_in_nc8, u_nk_for_slowpath, v_kc_for_slowpath)
+        # recv_quantized_nc is already (N, C)
+        reconstructed_nc = base_nc + recv_quantized_nc
 
     # Return only reconstructed
-    return reconstructed_cn
+    return reconstructed_nc
 
 
 # --- Test Functions ---
@@ -530,45 +494,48 @@ def profile_quantize_kernels(num_runs=1000, num_warmup=5):
     # Test both rank=4 and rank=-1
     RANKS_TO_TEST = [4, -1] # <<< Set Ranks for testing
 
-    print("--- Quant Performance & Correctness --- (ms per run)")
+    print("--- Quant Performance & Correctness (N,C Layout) --- (ms per run)")
 
     for rank_test in RANKS_TO_TEST:
         print(f"\\nTesting Rank: {rank_test}")
-        # Setup Tensors
-        x_tensor_cn = (torch.randn((CHANNEL, N_TOKENS), dtype=torch.half, device="cuda") * 0.5).contiguous()
-        base_tensor_cn = (torch.randn_like(x_tensor_cn) * 0.1).contiguous()
+        # Setup Tensors (N, C Layout)
+        x_tensor_nc = (torch.randn((N_TOKENS, CHANNEL), dtype=torch.half, device="cuda") * 0.5).contiguous()
+        base_tensor_nc = (torch.randn_like(x_tensor_nc) * 0.1).contiguous()
 
-        # Sim args (simplified)
-        sim_args = (x_tensor_cn, base_tensor_cn, rank_test, True) # update_cache = True
+        # Sim args (simplified, N, C layout)
+        sim_args = (x_tensor_nc, base_tensor_nc, rank_test, True) # update_cache = True
 
         # --- Calculate Reference Values (Simulation) ---
         with torch.random.fork_rng(devices=['cuda']):
             torch.manual_seed(42)
+            # Returns: packed(N,C//8), u(N,K), v(C,K), new_base(N,C)
             ref_packed, ref_scale_u, ref_scale_v, ref_new_base = sim_binary_quant_fastpath(*sim_args)
 
-        # --- Warm-up runs ---
+        # --- Warm-up runs --- 
         for _ in range(num_warmup):
             with torch.random.fork_rng(devices=['cuda']):
                  torch.manual_seed(42)
+                 # Call fastpath with N,C tensors
                  _ = binary_quant_fastpath(
-                     x_tensor_cn, base_tensor_cn,
+                     x_tensor_nc, base_tensor_nc,
                      rank=rank_test,
                      update_cache=True,
                  )
                  _ = sim_binary_quant_fastpath(*sim_args)
             torch.cuda.synchronize()
 
-        # --- Get Kernel results for correctness check ---
+        # --- Get Kernel results for correctness check --- 
         with torch.random.fork_rng(devices=['cuda']):
             torch.manual_seed(42)
+            # Returns: packed(N,C//8), u(N,K), v(C,K), new_base(N,C)
             kernel_packed, kernel_scale_u, kernel_scale_v, kernel_new_base = binary_quant_fastpath(
-                x_tensor_cn, base_tensor_cn,
+                x_tensor_nc, base_tensor_nc,
                 rank=rank_test,
                 update_cache=True,
             )
         torch.cuda.synchronize()
 
-        # --- Profiling Kernel ---
+        # --- Profiling Kernel --- 
         torch.cuda.synchronize()
         start_kernel = time.time()
         for i in range(num_runs):
@@ -577,7 +544,7 @@ def profile_quantize_kernels(num_runs=1000, num_warmup=5):
             with torch.random.fork_rng(devices=['cuda']):
                  torch.manual_seed(42 + i) # Vary seed slightly
                  _ = binary_quant_fastpath(
-                     x_tensor_cn, base_tensor_cn,
+                     x_tensor_nc, base_tensor_nc,
                      rank=rank_test,
                      update_cache=update_c,
                  )
@@ -586,24 +553,24 @@ def profile_quantize_kernels(num_runs=1000, num_warmup=5):
         kernel_time = (end_kernel - start_kernel) / num_runs
         print(f"Kernel (Rank {rank_test}): {kernel_time*1000:.3f} ms")
 
-        # --- Verify correctness (vs Sim with update_cache=True) ---
+        # --- Verify correctness (vs Sim with update_cache=True) --- 
         correct = True
         issues = []
-        # Packed
+        # Packed (N, C//8)
         if not torch.equal(ref_packed, kernel_packed):
             correct = False; issues.append(f"Packed (Max Diff: {torch.max(torch.abs(ref_packed.float() - kernel_packed.float()))})")
-        # Scale U
+        # Scale U (N, K)
         if not torch.allclose(ref_scale_u, kernel_scale_u, atol=atol, rtol=rtol):
             correct = False; issues.append(f"Scale U (Max Diff: {torch.max(torch.abs(ref_scale_u - kernel_scale_u))})")
-        # Scale V
+        # Scale V (C, K)
         if not torch.allclose(ref_scale_v, kernel_scale_v, atol=atol, rtol=rtol):
-             correct = False; issues.append(f"Scale V (Max Diff: {torch.max(torch.abs(ref_scale_v - kernel_scale_v))})")
-        # New Base
+             correct = False; issues.append(f"Scale V (Max Diff: {torch.max(torch.abs(ref_scale_v - kernel_scale_v))}) ")
+        # New Base (N, C)
         if ref_new_base is not None and kernel_new_base is not None:
              # Increase tolerance slightly for fp16 accumulation differences
              if not torch.allclose(ref_new_base, kernel_new_base, atol=atol*5, rtol=rtol*5):
                  max_diff_base = torch.max(torch.abs(ref_new_base - kernel_new_base))
-                 correct = False; issues.append(f"New Base (Max Diff: {max_diff_base})")
+                 correct = False; issues.append(f"New Base (Max Diff: {max_diff_base}) ")
         elif ref_new_base is not None or kernel_new_base is not None:
              correct = False; issues.append("New Base (Mismatch None/Not None)")
 
@@ -621,68 +588,69 @@ def profile_dequantize_kernels(num_runs=1000, num_warmup=5):
     # Test both rank=4 and rank=-1
     RANKS_TO_TEST = [4, -1] # <<< Set Ranks for testing
 
-    print("--- Dequant Performance & Correctness --- (ms per run)")
+    print("--- Dequant Performance & Correctness (N,C Layout) --- (ms per run)")
 
     for rank_test in RANKS_TO_TEST:
         print(f"\\nTesting Rank: {rank_test}")
-        # Setup Tensors
-        x_tensor_cn = (torch.randn((CHANNEL, N_TOKENS), dtype=torch.half, device="cuda") * 0.5).contiguous()
-        base_cn = (torch.randn_like(x_tensor_cn) * 0.1).contiguous()
+        # Setup Tensors (N, C layout)
+        x_tensor_nc = (torch.randn((N_TOKENS, CHANNEL), dtype=torch.half, device="cuda") * 0.5).contiguous()
+        base_nc = (torch.randn_like(x_tensor_nc) * 0.1).contiguous()
 
         # --- Generate Inputs using Quant Sim (no cache update needed here) ---
-        quant_sim_args = (x_tensor_cn, base_cn, rank_test, False) # update_cache = False
+        quant_sim_args = (x_tensor_nc, base_nc, rank_test, False) # update_cache = False
 
         with torch.random.fork_rng(devices=['cuda']):
             torch.manual_seed(42)
-            # Quant sim returns 4 values now, we need packed and scales
+            # Quant sim returns: packed(N,C//8), u(N,K), v(C,K), _
             input_packed, input_scale_u, input_scale_v, _ = sim_binary_quant_fastpath(*quant_sim_args)
 
         # --- Calculate Reference Outputs (Dequant Simulation) ---
-        # Dequant sim args
-        dequant_sim_args = (input_packed, input_scale_u, input_scale_v, base_cn)
+        # Dequant sim args: packed(N,C//8), u(N,K), v(C,K), base(N,C)
+        dequant_sim_args = (input_packed, input_scale_u, input_scale_v, base_nc)
 
         with torch.random.fork_rng(devices=['cuda']):
              torch.manual_seed(43) # Use different seed just in case
-             ref_reconstructed_cn = sim_binary_dequant_fastpath(*dequant_sim_args)
+             ref_reconstructed_nc = sim_binary_dequant_fastpath(*dequant_sim_args)
 
-        # --- Warm-up runs ---
+        # --- Warm-up runs --- 
         for _ in range(num_warmup):
              with torch.random.fork_rng(devices=['cuda']):
                  torch.manual_seed(43)
+                 # Call fastpath dequant with N,C base and scales U(N,K), V(C,K)
                  _ = binary_dequant_fastpath(
-                     input_packed, input_scale_u, input_scale_v, base_cn
+                     input_packed, input_scale_u, input_scale_v, base_nc
                  )
                  _ = sim_binary_dequant_fastpath(*dequant_sim_args)
              torch.cuda.synchronize()
 
-        # --- Get Kernel results for correctness check ---
+        # --- Get Kernel results for correctness check --- 
         with torch.random.fork_rng(devices=['cuda']):
              torch.manual_seed(43)
-             kernel_reconstructed_cn = binary_dequant_fastpath(
-                 input_packed, input_scale_u, input_scale_v, base_cn
+             kernel_reconstructed_nc = binary_dequant_fastpath(
+                 input_packed, input_scale_u, input_scale_v, base_nc
              )
         torch.cuda.synchronize()
 
-        # --- Profiling Kernel ---
+        # --- Profiling Kernel --- 
         torch.cuda.synchronize()
         start_kernel = time.time()
         for _ in range(num_runs):
             _ = binary_dequant_fastpath(
-                input_packed, input_scale_u, input_scale_v, base_cn
+                input_packed, input_scale_u, input_scale_v, base_nc
             )
         torch.cuda.synchronize()
         end_kernel = time.time()
         kernel_time = (end_kernel - start_kernel) / num_runs
         print(f"Kernel (Rank {rank_test}): {kernel_time*1000:.3f} ms")
 
-        # --- Verify correctness ---
+        # --- Verify correctness --- 
         correct = True
         issues = []
-        # Reconstructed
+        # Reconstructed (N, C)
         # Increase tolerance slightly for fp16 accumulation differences
-        if not torch.allclose(ref_reconstructed_cn, kernel_reconstructed_cn, atol=atol*5, rtol=rtol*5):
-            max_diff_recon = torch.max(torch.abs(ref_reconstructed_cn - kernel_reconstructed_cn))
-            correct = False; issues.append(f"Reconstructed (Max Diff: {max_diff_recon})")
+        if not torch.allclose(ref_reconstructed_nc, kernel_reconstructed_nc, atol=atol*5, rtol=rtol*5):
+            max_diff_recon = torch.max(torch.abs(ref_reconstructed_nc - kernel_reconstructed_nc))
+            correct = False; issues.append(f"Reconstructed (Max Diff: {max_diff_recon}) ")
 
         print(f"Correctness vs Sim (Rank {rank_test}): {correct}")
         if not correct: print(f"  Issues: {', '.join(issues)}\\n")

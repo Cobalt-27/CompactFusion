@@ -36,10 +36,10 @@ def assert_tensor_close(tensor1, tensor2, tol=1e-3, desc=""):
              relative_error = norm_diff / norm_tensor1
              assert relative_error < tol, f"{desc}: Tensors differ by more than relative tol {tol}, relative error: {relative_error}"
 
-def assert_tensor_approx(tensor1, tensor2, tol=1e-4):
+def assert_tensor_approx(tensor1, tensor2, tol=1e-4, desc=""):
     # For quantized tensors and low-rank
     relative_error = torch.norm(tensor1 - tensor2) / torch.norm(tensor1)
-    assert relative_error < tol, f"Tensors differ by more than {tol}, relative error: {relative_error}"
+    assert relative_error < tol, f"{desc}: Tensors differ by more than {tol}, relative error: {relative_error}"
 
 LOOP_CNT = 8
 
@@ -83,12 +83,12 @@ def test_topk_sparsify(m, A, B_2m, seed):
     "A,B_2m", [(1024, 2048), (512, 4096), (256, 8192)]
 )  # Large tensor sizes
 @pytest.mark.parametrize("seed", [42, 43, 44])
+@pytest.mark.parametrize("rank", [4, -1]) # <<< Add rank parameter including -1
 def test_1_bit_quantization(
-    A, B_2m, seed
+    A, B_2m, seed, rank
 ):
     # No need to set seed outside the loop if using fork_rng inside
     # torch.manual_seed(seed)
-    RANK = 4 # Define rank to test
     for i in range(LOOP_CNT):
         # Use a slightly different tensor each loop iter if desired, or keep fixed
         loop_seed = seed + i # Ensure different input tensors per loop if needed
@@ -98,12 +98,12 @@ def test_1_bit_quantization(
         # Simulate 1-bit quantization in Python with controlled RNG
         with torch.random.fork_rng(devices=[input_tensor.device]):
             torch.manual_seed(loop_seed) # Reset seed for sim
-            quantized_simulated = sim_binary(input_tensor, rank=RANK) # <<< Pass rank
+            quantized_simulated = sim_binary(input_tensor, rank=rank)
         
         # Perform actual quantization/dequantization with controlled RNG
         with torch.random.fork_rng(devices=[input_tensor.device]):
             torch.manual_seed(loop_seed) # Reset seed for actual quant
-            compressed_tensor, scale_u, scale_v = quantize_1bit(input_tensor, rank=RANK) # <<< Pass rank
+            compressed_tensor, scale_u, scale_v = quantize_1bit(input_tensor, rank=rank)
         
         # Dequantize using the results from the actual quantization
         decompressed_tensor = dequantize_1bit(compressed_tensor, scale_u, scale_v)
@@ -140,43 +140,66 @@ def test_compress_decompress_vs_sim(n, hidden, seed, compact_method, sparse_rati
         # Generate a random 3D input tensor with a batch dimension
         input_tensor = torch.randn((n, hidden), dtype=torch.half, device="cuda")
         RANK = 2
+        RANKS_TO_TEST = [RANK] # Default rank for non-binary or fallback
+        if compact_method == COMPACT_COMPRESS_TYPE.BINARY:
+            RANKS_TO_TEST = [RANK, -1] # Test both positive rank and mean-as-scale
+
         loop_seed = seed + i
-        # Use same seed scope for both operations, as lowrank requires random q
-        with torch.random.fork_rng(devices=[input_tensor.device]):
-            torch.manual_seed(loop_seed)
-            # Get the simulated compression result
-            simulated_result = sim_compress(input_tensor, compact_method, rank=RANK, sparse_ratio=sparse_ratio)
-        with torch.random.fork_rng(devices=[input_tensor.device]):
-            torch.manual_seed(loop_seed)    
-            # Perform actual compression
-            compressed = slowpath_compress(input_tensor, compact_method, rank=RANK, sparse_ratio=sparse_ratio)
-        
-        # Decompress the compressed tensor
-        decompressed = slowpath_decompress(compressed, input_tensor.shape, compact_method, rank=RANK, sparse_ratio=sparse_ratio)
-        
-        # Compare the decompressed tensor with the simulated result
-        assert_tensor_approx(decompressed, simulated_result)
+        for test_rank in RANKS_TO_TEST:
+            # Skip rank testing if method doesn't use it (like SPARSE)
+            if compact_method != COMPACT_COMPRESS_TYPE.BINARY and compact_method != COMPACT_COMPRESS_TYPE.LOW_RANK and test_rank == -1:
+                continue # Only test rank=-1 for BINARY
+
+            current_rank = test_rank if (compact_method == COMPACT_COMPRESS_TYPE.BINARY or compact_method == COMPACT_COMPRESS_TYPE.LOW_RANK) else None
+
+            # Use same seed scope for both operations, as lowrank requires random q
+            with torch.random.fork_rng(devices=[input_tensor.device]):
+                torch.manual_seed(loop_seed)
+                # Get the simulated compression result
+                simulated_result = sim_compress(input_tensor, compact_method, rank=current_rank, sparse_ratio=sparse_ratio)
+            with torch.random.fork_rng(devices=[input_tensor.device]):
+                torch.manual_seed(loop_seed)
+                # Perform actual compression
+                compressed = slowpath_compress(input_tensor, compact_method, rank=current_rank, sparse_ratio=sparse_ratio)
+            
+            # Decompress the compressed tensor
+            decompressed = slowpath_decompress(compressed, input_tensor.shape, compact_method, rank=current_rank, sparse_ratio=sparse_ratio)
+            
+            # Compare the decompressed tensor with the simulated result
+            assert_tensor_approx(decompressed, simulated_result, desc=f"Rank={current_rank}")
 
 @pytest.mark.parametrize(
     "n,hidden", [(1024, 2048), (1024, 512), (64, 1024)]
 )  # Sequence and hidden dimensions
 @pytest.mark.parametrize("seed", [42, 43, 44])  # Different random seeds
-def test_subspace_iter(n, hidden, seed):
+@pytest.mark.parametrize("target_rank", [1, 2]) # Test rank 1 (power iter) and > 1 (subspace iter)
+def test_subspace_iter(n, hidden, seed, target_rank):
     torch.manual_seed(seed)
     for _ in range(LOOP_CNT):
         # Generate a nearly low-rank matrix by adding small noise to a low-rank matrix
-        GEN_RANK = 2  # Much smaller than n and hidden
+        GEN_RANK = target_rank # Ensure gen_rank is at least 2 for generating base matrix
         left = torch.randn((n, GEN_RANK), dtype=torch.float, device="cuda")
         right = torch.randn((GEN_RANK, hidden), dtype=torch.float, device="cuda")
-        low_rank = left @ right  # This is exactly rank-10
-        noise = 0.1 * torch.randn((n, hidden), dtype=torch.float, device="cuda")  # Small noise
-        TARGET_RANK = 2
-        input_tensor = low_rank + noise  # Nearly low-rank matrix
-        pu, pv, _ = subspace_iter(input_tensor, TARGET_RANK, 100)
-        p_reconstructed = pu @ pv
-        u, v = svd(input_tensor, TARGET_RANK)
-        s_reconstructed = u @ v
-        assert_tensor_approx(p_reconstructed, s_reconstructed, tol=1e-1)
+        low_rank = left @ right  # Base low-rank matrix
+        noise = 0.01 * torch.norm(low_rank) * torch.randn((n, hidden), dtype=torch.float, device="cuda") # Relative noise
+        input_tensor = (low_rank + noise).half() # Test with half precision input
+
+        # Use the public subspace_iter which dispatches to power_iter for rank=1
+        pu, pv, _ = subspace_iter(input_tensor, target_rank, num_iters=20) # Increase iters for better convergence
+        p_reconstructed = pu.float() @ pv.float()
+
+        # Get reference reconstruction from SVD
+        u, v = svd(input_tensor, target_rank)
+        s_reconstructed = u.float() @ v.float()
+
+        # Use a slightly looser tolerance, especially for rank 1 / power iteration
+        tolerance = 1e-1
+        assert_tensor_approx(
+            p_reconstructed,
+            s_reconstructed,
+            tol=tolerance,
+            desc=f"Rank={target_rank}"
+        )
 
 # Run tests
 if __name__ == "__main__":
