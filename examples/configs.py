@@ -14,9 +14,13 @@ def get_config(model_name: str, method: str):
         elif method == "df":
             config = _flux_distrifusion_config()
         elif method == "pipe":
-            config = _flux_pipe_config()
+            config = _disabled_config()
         elif method == "ring":
-            config = _flux_ring_config()
+            config = _disabled_config()
+        elif method == "patch":
+            config = _flux_patch_config()
+        elif method == "ulysses":
+            config = _disabled_config()
     elif model_name == "pixart":
         if method == "binary":
             config = _pixart_binary_config()
@@ -27,9 +31,13 @@ def get_config(model_name: str, method: str):
         elif method == "df":
             config = _pixart_distrifusion_config()
         elif method == "pipe":
-            config = _pixart_pipe_config()
+            config = _disabled_config()
         elif method == "ring":
-            config = _pixart_ring_config()
+            config = _disabled_config()
+        elif method == "patch":
+            config = _pixart_patch_config()
+        elif method == "ulysses":
+            config = _disabled_config()
     else:
         raise ValueError(f"Model {model_name} not supported")
     assert isinstance(config, CompactConfig)
@@ -88,20 +96,29 @@ def _flux_distrifusion_config():
         fastpath=False,
     )
 
-def _flux_pipe_config():
+def _disabled_config():
     return CompactConfig(
         enabled=False,
         compress_func=None,
         simulate=False,
         log_stats=False,
     )
-    
-def _flux_ring_config():
+
+def _flux_patch_config():
+    patch_config = PatchConfig(
+        use_compact=False,
+        async_comm=False,
+        async_warmup=2,
+    )
     return CompactConfig(
-        enabled=False,
+        enabled=True,
+        override_with_patch_gather_fwd=True,
+        patch_gather_fwd_config=patch_config,
         compress_func=None,
+        ef=True,
         simulate=False,
         log_stats=False,
+        fastpath=False,
     )
 
 
@@ -145,31 +162,31 @@ def _pixart_distrifusion_config():
     patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
-        async_warmup=2,
+        async_warmup=None,
     )
     return CompactConfig(
         enabled=True,
         override_with_patch_gather_fwd=True,
         patch_gather_fwd_config=patch_config,
         compress_func=None,
-        ef=True,
         simulate=False,
         log_stats=False,
         fastpath=False,
     )
 
-def _pixart_pipe_config():
-    return CompactConfig(
-        enabled=False,
-        compress_func=None,
-        simulate=False,
-        log_stats=False,
+
+def _pixart_patch_config():
+    patch_config = PatchConfig(
+        use_compact=False,
+        async_comm=False,
+        async_warmup=None,
     )
-    
-def _pixart_ring_config():
     return CompactConfig(
-        enabled=False,
+        enabled=True,
+        override_with_patch_gather_fwd=True,
+        patch_gather_fwd_config=patch_config,
         compress_func=None,
         simulate=False,
         log_stats=False,
+        fastpath=False,
     )
