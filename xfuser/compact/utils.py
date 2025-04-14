@@ -42,7 +42,7 @@ class CompactConfig:
         ref_activation_path: str | None = None,
         dump_activations: bool = False,
         calc_total_error: bool = False,
-        delta_decay_factor: float = 0.5
+        delta_decay_factor: float | None = None
     ):
         """
         Initialize compression settings.
@@ -84,7 +84,9 @@ class CompactConfig:
         self.override_with_patch_gather_fwd = override_with_patch_gather_fwd
         self.patch_gather_fwd_config = patch_gather_fwd_config
         
-        
+        assert cache_low_rank_dim is None, "deprecated"
+        assert self.quantized_cache is False, "deprecated"
+        assert self.compress_residual != 2, "deprecated"
         
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
