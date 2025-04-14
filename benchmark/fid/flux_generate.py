@@ -10,7 +10,7 @@ from xfuser.core.distributed import (
 )
 import gc
 import time
-
+from xfuser.prof import Profiler
 
 _NUM_FID_CANDIDATE = 5000
 CFG = 1.5
@@ -37,16 +37,16 @@ def main():
     from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
-        enabled=False,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-        comp_rank=16,
+        comp_rank=2,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True, 
         simulate=False,
         log_stats=False,
         check_consist=False,
-        fastpath=False,
+        fastpath=True ,
         ref_activation_path='ref_activations',
         dump_activations=False,
         calc_total_error=False,
@@ -86,6 +86,8 @@ def main():
     num_prompt_one_step = 1
     compact_hello()
     total_time = []
+    profiler = Profiler().instance()
+    profiler.disable()
     for j in range(0, _NUM_FID_CANDIDATE, num_prompt_one_step):
         start_time = time.time()
         compact_reset()

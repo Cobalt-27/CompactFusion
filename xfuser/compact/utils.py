@@ -16,7 +16,6 @@ class COMPACT_COMPRESS_TYPE(Enum):
     WARMUP = "warmup"
     SPARSE = "sparse"
     BINARY = "binary"
-    BINARY_MEAN_AS_SCALE = "binary-mean-as-scale"
     INT2 = "int2"
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
     LOW_RANK = "low-rank"
@@ -43,7 +42,7 @@ class CompactConfig:
         ref_activation_path: str | None = None,
         dump_activations: bool = False,
         calc_total_error: bool = False,
-        delta_decay_factor: float = 0.5
+        delta_decay_factor: float | None = None
     ):
         """
         Initialize compression settings.
@@ -85,7 +84,9 @@ class CompactConfig:
         self.override_with_patch_gather_fwd = override_with_patch_gather_fwd
         self.patch_gather_fwd_config = patch_gather_fwd_config
         
-        
+        assert cache_low_rank_dim is None, "deprecated"
+        assert self.quantized_cache is False, "deprecated"
+        assert self.compress_residual != 2, "deprecated"
         
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
@@ -121,7 +122,10 @@ class CompactCache:
         # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-        self.base[key] = base
+        if key in self.base:
+            self.base[key].copy_(base)
+        else:
+            self.base[key] = base
 
         # Compress or store delta_base
         if delta_base is not None:

@@ -15,7 +15,7 @@ except ImportError:
     _flash_attn_forward = None
     from yunchang.kernels.attention import pytorch_attn_forward
 
-
+_buffers = {}
 @Profiler.prof_func("patch_gather_fwd.gather_patch_fwd")
 def patch_gather_fwd(
     q: torch.Tensor,
@@ -116,9 +116,13 @@ def patch_gather_fwd(
         # print(f"k_cache_key: {k_cache_key}, v_cache_key: {v_cache_key}")
         with Profiler.scope("df.all_gather"):
             if current_iter < config.async_warmup:
+                if _buffers.get(k_cache_key) is None:
+                    _buffers[k_cache_key] = [torch.empty_like(k).contiguous() for _ in range(world_size)]
+                    _buffers[v_cache_key] = [torch.empty_like(v).contiguous() for _ in range(world_size)]
+                
                 # --- Warmup Phase (Sync Gather + Cache Dummy Handle) --- #
-                k_list = [torch.empty_like(k).contiguous() for _ in range(world_size)]
-                v_list = [torch.empty_like(v).contiguous() for _ in range(world_size)]
+                k_list = _buffers[k_cache_key]
+                v_list = _buffers[v_cache_key]
                 # Perform actual sync gather
                 dist.all_gather(k_list, k, group=process_group)
                 dist.all_gather(v_list, v, group=process_group)
@@ -146,16 +150,16 @@ def patch_gather_fwd(
                 prev_v_handle.wait()
 
                 # Use the received data for computation in *this* step
-                k_list_for_computation = prev_k_list
-                v_list_for_computation = prev_v_list
+                k_list_for_computation = [buf.clone() for buf in prev_k_list]
+                v_list_for_computation = [buf.clone() for buf in prev_v_list]
                 
                 # update with fresh k v
                 k_list_for_computation[rank] = k.clone()
                 v_list_for_computation[rank] = v.clone()
                 # Launch the *current* step's async gather for the *next* step
                 # Prepare receive buffers for the next step's gather
-                next_k_list = [torch.empty_like(k).contiguous() for _ in range(world_size)]
-                next_v_list = [torch.empty_like(v).contiguous() for _ in range(world_size)]
+                next_k_list = _buffers[k_cache_key]
+                next_v_list = _buffers[v_cache_key]
 
                 # Launch async all_gather
                 k_handle = dist.all_gather(next_k_list, k, group=process_group, async_op=True)
