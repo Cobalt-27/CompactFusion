@@ -55,6 +55,7 @@ def compact_hello():
             if not _config.override_with_patch_gather_fwd:
                 print(f"🟦  Fastpath" if _config.fastpath else "🟫  No fastpath")
                 print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
+                print(f"🟦  Stats log" if _config.log_compress_stats else "🟫  No stats log")
                 print(f"🟦  Check consistency" if _config.check_cache_consistency else "🟫  No check consistency")
                 print(f"🟦  Dump activations" if _config.dump_activations else "🟫  No dump activations")
                 print(f"🟦  Calculate total error" if _config.calc_total_error else "🟫  No calculate total error")
