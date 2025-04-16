@@ -1,11 +1,11 @@
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
-export CAPTION_FILE="/root/autodl-tmp/ref_images/prompts.json"
-export SAMPLE_IMAGES_FOLDER="/root/autodl-tmp/generated_images_2"
+export CAPTION_FILE="prompts.json"
+export SAMPLE_IMAGES_FOLDER="results/gen_latency_test"
 
 # Select the model type
-export MODEL_TYPE="Flux"
+export MODEL_TYPE="Pixart-alpha"
 
 export COMPACT_TEST_ENABLE=1
 export COMPACT_TEST_MODEL="$MODEL_TYPE"
@@ -32,7 +32,7 @@ fi
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
-    ["Pixart-alpha"]="pixartalpha_generate.py /root/autodl-fs/PixArt-XL-2-1024-MS 20"
+    ["Pixart-alpha"]="pixartalpha_generate.py PixArt-alpha/PixArt-XL-2-1024-MS 20"
     ["Flux"]="flux_generate.py /root/autodl-fs/FLUX.1-dev 28"
 )
 

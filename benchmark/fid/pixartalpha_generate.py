@@ -87,13 +87,16 @@ def main():
     else:
         pipe = pipe.to(f'cuda:{local_rank}')
 
-    pipe.prepare_run(input_config, steps=1)
+    pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
     
     from dataloader import get_dataset
     with open(args.caption_file, "r") as f:
         captions = json.load(f)
-    dataset = get_dataset()
-    filenames = dataset["filename"][:len(captions)]
+    if TEST_ENABLE:
+        filenames = [f"test_{i}.png" for i in range(len(captions))]
+    else:
+        dataset = get_dataset()
+        filenames = dataset["filename"][:len(captions)]
     
     folder_path = args.sample_images_folder
     if not os.path.exists(folder_path):
