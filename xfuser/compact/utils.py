@@ -86,7 +86,7 @@ class CompactConfig:
         
         assert cache_low_rank_dim is None, "deprecated"
         assert self.quantized_cache is False, "deprecated"
-        assert self.compress_residual != 2, "deprecated"
+        # assert self.compress_residual != 2, "deprecated"
         
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
@@ -116,30 +116,31 @@ class CompactCache:
         self.delta_base = {}
         self.passed_count = 0
         self.subspace_iters = 2
+        assert self.low_rank_dim is None, "deprecated"
 
     # @Profiler.prof_func("compact.CompactCache.put")
     def put(self, key, base, delta_base):
         # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-        if key in self.base:
-            self.base[key].copy_(base)
-        else:
-            self.base[key] = base
+        # if key in self.base:
+        #     self.base[key] = base
+        # else:
+        self.base[key] = base
 
         # Compress or store delta_base
         if delta_base is not None:
             # Apply low-rank compression only if dim is a valid integer > 0 and < shape
-            if self.low_rank_dim is not None:
-                assert self.low_rank_dim > 0 and self.low_rank_dim < min(delta_base.shape)
-                U, V, _ = subspace_iter(
-                    delta_base,
-                    rank=self.low_rank_dim,
-                    num_iters=self.subspace_iters
-                )
-                self.delta_base[key] = (U, V)
-            else: # Store original tensor directly (if dim is None, 0, or >= shape)
-                self.delta_base[key] = delta_base
+            # if self.low_rank_dim is not None:
+            #     assert self.low_rank_dim > 0 and self.low_rank_dim < min(delta_base.shape)
+            #     U, V, _ = subspace_iter(
+            #         delta_base,
+            #         rank=self.low_rank_dim,
+            #         num_iters=self.subspace_iters
+            #     )
+            #     self.delta_base[key] = (U, V)
+            # else: # Store original tensor directly (if dim is None, 0, or >= shape)
+            self.delta_base[key] = delta_base
         else:
             self.delta_base[key] = None
 
@@ -156,13 +157,13 @@ class CompactCache:
         # Retrieve stored item for delta_base
         stored_item = self.delta_base.get(key, None)
 
-        if isinstance(stored_item, tuple):
-            # Assumes tuple is (U, V) from compression
-            factor_U, factor_V = stored_item
-            return factor_U @ factor_V
-        else:
+        # if isinstance(stored_item, tuple):
+        #     # Assumes tuple is (U, V) from compression
+        #     factor_U, factor_V = stored_item
+        #     return factor_U @ factor_V
+        # else:
             # Handles Tensor, None, or unexpected types (returns stored_item which would be Tensor or None)
-            return stored_item
+        return stored_item
 
     def check_consistency(self, group=None):
         """
