@@ -88,6 +88,7 @@ def _compact_ring_fwd(
     mod_idx=None,
     current_iter=None,
 ):
+    # (bs, seq_len, head_cnt, head_size)
     assert alibi_slopes is None
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -180,7 +181,7 @@ def _compact_ring_fwd(
                 key_to_use, value_to_use = k, v
         else:
             key_to_use, value_to_use = k, v
-
+        # (bs, seq_len, head_cnt, head_size)
         if not causal or step <= comm.rank:
             if flash_attn is None:
                 block_out, block_lse = pytorch_attn_forward(
@@ -206,7 +207,8 @@ def _compact_ring_fwd(
                         return_softmax=True and dropout_p > 0,
                     )
                 else:
-                     block_out, block_lse, _, _ = _flash_attn_forward(
+                    raise NotImplementedError("flash_attn version is not supported")
+                    block_out, block_lse, _, _ = _flash_attn_forward(
                         q,
                         key_to_use,
                         value_to_use,
@@ -227,6 +229,31 @@ def _compact_ring_fwd(
             k_to_send = buf_k 
             v_to_send = buf_v
             prev_compress_type = compress_type
+    
+    AWL = True # attn aware lowrank
+    if AWL:
+        token_importance = lse.squeeze(dim=-1) # -> nhead, seq_len
+        assert token_importance.shape == (q.shape[0], q.shape[1], k.shape[2]), f"{token_importance.shape} != {(q.shape[0], q.shape[1], k.shape[2])}, q.shape: {q.shape}, k.shape: {k.shape}"
+        # token_importance = torch.exp(token_importance)
+        token_importance = torch.sum(token_importance.float(), dim=(0,2)).flatten()
+        # Set top 10% tokens to a scale of 10, others to a scale of 1
+        num_tokens = token_importance.size(0)
+        top_k = int(num_tokens * 0.05)  # Calculate how many tokens are in the top 10%
+        # Find the threshold value for the top 10%
+        threshold = torch.topk(token_importance, top_k, largest=True).values[-1]
+        # Create a new tensor with scale values (10 for top 10%, 1 for others)
+        token_scale = torch.ones_like(token_importance)
+        token_scale[token_importance >= threshold] = 20.0
+        # Replace token_importance with the scaled version
+        token_importance = token_scale
+        # print(f'token_importance 1%: {token_importance.quantile(0.01):.4f}, 99%: {token_importance.quantile(0.99):.4f}')
+        # # token_importance = token_importance.pow(2)
+        # token_importance = torch.softmax(token_importance, dim=-1)
+        # print(f"token_importance 1%: {token_importance.quantile(0.01):.4f}, 99%: {token_importance.quantile(0.99):.4f}")
+        from xfuser.compact.slowpath import set_current_lowrank_scale
+        assert token_importance.shape == (q.shape[1],), f"{token_importance.shape} != {(q.shape[1],)}, q.shape: {q.shape}"
+        set_current_lowrank_scale(token_importance)
+    
     out = out.to(q.dtype)
     lse = lse.squeeze(dim=-1).transpose(1, 2)
     if compact_config().check_cache_consistency:

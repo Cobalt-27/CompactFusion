@@ -20,6 +20,12 @@ from xfuser.compact.utils import (
     CompactCache,
     COMPACT_COMPRESS_TYPE,
 )
+_current_lowrank_scale = None #size 
+
+def set_current_lowrank_scale(scale: torch.Tensor):
+    global _current_lowrank_scale
+    _current_lowrank_scale = scale
+
 def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, rank: int = None, sparse_ratio: int = None):
     """
     Pure function to compress a tensor using the specified method.
@@ -50,7 +56,16 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
         comp_list = [q.view(torch.half).contiguous(), scale_u.view(-1).contiguous(), scale_v.view(-1).contiguous()]
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK compression"
+        # assert shape
+        
+        if _current_lowrank_scale is not None:
+            assert _current_lowrank_scale.shape == (N,)
+            x = x.float() * _current_lowrank_scale.view(N, 1)
         u, v, _ = subspace_iter(x, rank, 2)
+        if _current_lowrank_scale is not None:
+            u = u / _current_lowrank_scale.view(N, 1)
+        u = u.half()
+        v = v.half()
         assert u.size(1) == v.size(0) and u.dtype == torch.half and v.dtype == torch.half
         # contiguous() is necessary for later cat
         comp_list = [u.contiguous(), v.contiguous()]
