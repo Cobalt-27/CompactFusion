@@ -33,26 +33,9 @@ def main():
     """
     COMPACT
     """
-    from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
-    from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
-    compact_config = CompactConfig(
-        enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
-        sparse_ratio=8,
-        comp_rank=2,
-        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
-        ef=True, 
-        simulate=False,
-        log_stats=False,
-        check_consist=False,
-        fastpath=True ,
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
-        cache_low_rank_dim=None,
-        delta_decay_factor=0.3
-    )
+    from xfuser.compact.main import compact_init, compact_reset, compact_hello
+    from examples.configs import get_config
+    compact_config = get_config("flux", "binary")
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
