@@ -126,7 +126,9 @@ def xdit_ring_flash_attn_forward(
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 != comm.world_size:
-            comm.wait()
+            from xfuser.prof import Profiler
+            with Profiler.instance().scope("xdit_ring.wait"):
+                comm.wait()
             k = next_k
             v = next_v
 

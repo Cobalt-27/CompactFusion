@@ -18,26 +18,21 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.cache.diffusers_adapters import apply_cache_on_transformer
 
-def main():
-    parser = FlexibleArgumentParser(description="xFuser Arguments")
-    args = xFuserArgs.add_cli_args(parser).parse_args()
-    engine_args = xFuserArgs.from_cli_args(args)
-    engine_config, input_config = engine_args.create_config()
-    DTYPE = torch.half
-    engine_config.runtime_config.dtype = DTYPE
-    local_rank = get_world_group().local_rank
-    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=DTYPE)
+import os
 
-    if args.use_fp8_t5_encoder:
-        from optimum.quanto import freeze, qfloat8, quantize
-        logging.info(f"rank {local_rank} quantizing text encoder 2")
-        quantize(text_encoder_2, weights=qfloat8)
-        freeze(text_encoder_2)
-        
+
+from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
+from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
+from xfuser.compact.patchpara.df_utils import PatchConfig
+from xfuser.prof import Profiler, prof_summary
+import diffusers.utils.logging
+from examples.test_utils import TEST_ENABLE, TEST_MODEL, TEST_METHOD, TEST_LOOP, test_hello
+
+def customized_compact_config():
     """
     COMPACT
     """
-    from xfuser.compact.patchpara.df_utils import PatchConfig
+    assert not TEST_ENABLE
     prepared_patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
@@ -45,9 +40,6 @@ def main():
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
-    from xfuser.prof import Profiler, prof_summary, set_torch_profiler
-    from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
         enabled=True,
@@ -67,6 +59,33 @@ def main():
         calc_total_error=False,
         delta_decay_factor=0.5
     )
+    return compact_config
+
+
+def main():
+    parser = FlexibleArgumentParser(description="xFuser Arguments")
+    args = xFuserArgs.add_cli_args(parser).parse_args()
+    engine_args = xFuserArgs.from_cli_args(args)
+    engine_config, input_config = engine_args.create_config()
+    DTYPE = torch.half
+    engine_config.runtime_config.dtype = DTYPE
+    local_rank = get_world_group().local_rank
+    text_encoder_2 = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder_2", torch_dtype=DTYPE)
+
+    if args.use_fp8_t5_encoder:
+        from optimum.quanto import freeze, qfloat8, quantize
+        logging.info(f"rank {local_rank} quantizing text encoder 2")
+        quantize(text_encoder_2, weights=qfloat8)
+        freeze(text_encoder_2)
+    
+    """
+    COMPACT
+    """
+    if TEST_ENABLE:
+        from examples.configs import get_config
+        compact_config = get_config(TEST_MODEL, TEST_METHOD)
+    else:
+        compact_config = customized_compact_config()
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -97,11 +116,17 @@ def main():
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
     pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
-    
+    if local_rank == 0:
+        print(f"prepare run finished")
+    if local_rank == 0:
+        test_hello()
     compact_hello()
-    LOOP_COUNT = 4
+    if TEST_ENABLE:
+        LOOP_COUNT = TEST_LOOP
+    else:
+        LOOP_COUNT = 4
 
-    for _ in range(LOOP_COUNT):
+    for i in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
@@ -124,13 +149,14 @@ def main():
             # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
+        Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
         if local_rank == 0:
             stats_verbose()
             prof_result = prof_summary(Profiler.instance(), rank=local_rank)
             print(str.join("\n", prof_result))
-            plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # save_eigenvalues(save_dir="./results/eigenvalues")
             
     parallel_info = (
@@ -139,6 +165,9 @@ def main():
         f"tp{engine_args.tensor_parallel_degree}_"
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
+    test_info = f"_test_{TEST_MODEL}_{TEST_METHOD}" if TEST_ENABLE else ""
+    parallel_info += f"{test_info}"
+    
     if input_config.output_type == "pil":
         dp_group_index = get_data_parallel_rank()
         num_dp_groups = get_data_parallel_world_size()
