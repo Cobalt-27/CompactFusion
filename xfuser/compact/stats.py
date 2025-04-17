@@ -5,8 +5,8 @@ import os # Added for path operations
 import matplotlib.pyplot as plt
 from typing import Optional, Dict, List, Tuple
 
-# EIGENVALUES_PLOT_STEPS = [1]
-# EIGENVALUES_PLOT_LAYERS = [0, 1]
+# EIGENVALUES_PLOT_STEPS = [10]
+# EIGENVALUES_PLOT_LAYERS = [10, 20]
 EIGENVALUES_PLOT_STEPS = []
 EIGENVALUES_PLOT_LAYERS = []
 
@@ -19,6 +19,7 @@ class StatsLogger:
         # Prev step storage for similarity calculations
         self.prev_activations = {}
         self.prev_deltas = {}
+        self.prev_transmitted_deltas = {} # Added storage for transmitted delta
         self.plot_counter = 0 # for plotting
         # For volume tracking
         self.total_original_volume = 0
@@ -99,14 +100,20 @@ class StatsLogger:
         self.total_compressed_volume += compressed_size_bytes
         
         # Calculate delta and delta-delta based on residual level
+        delta = None
+        delta_delta = None
+        transmitted_delta = None
+        transmitted_delta_sim = None
+        
         if compress_residual == 0:
-            delta = None
-            delta_delta = None
+            pass # No deltas calculated
         elif compress_residual == 1:
-            delta = before_comp_activation - base 
+            delta = before_comp_activation - base
+            transmitted_delta = recv_activation - base
             delta_delta = None
         elif compress_residual == 2:
             delta = before_comp_activation - base
+            transmitted_delta = recv_activation - base # Still recv_activation - base
             delta_delta = before_comp_activation - base - delta_base
             # from xfuser.compact.plot import plot_3d
             # plot_3d(delta_delta, title=f"dd_{key}_{self.plot_counter}")
@@ -132,10 +139,45 @@ class StatsLogger:
             ).item()
             
         if delta is not None and key in self.prev_deltas:
+             # Assertions for delta_sim calculation
+             current_delta_flat = delta.flatten()
+             prev_delta_flat = self.prev_deltas[key].flatten().to(delta.device)
+
+             assert torch.isfinite(current_delta_flat).all(), f"NaN/inf found in current delta for key {key}"
+             assert torch.isfinite(prev_delta_flat).all(), f"NaN/inf found in previous delta for key {key}"
+
+             current_norm = torch.norm(current_delta_flat)
+             prev_norm = torch.norm(prev_delta_flat)
+             assert current_norm > 1e-8, f"Current delta is zero vector for key {key}, norm: {current_norm}"
+             assert prev_norm > 1e-8, f"Previous delta is zero vector for key {key}, norm: {prev_norm}"
+
              delta_sim = torch.nn.functional.cosine_similarity(
-                delta.flatten(), 
-                self.prev_deltas[key].flatten().to(delta.device), 
-                dim=0
+                current_delta_flat, # Use flattened tensors
+                prev_delta_flat,
+                dim=0,
+                eps=1e-8 # Add epsilon for numerical stability
+            ).item()
+        
+        # Calculate transmitted delta similarity
+        transmitted_delta_sim = None # Initialize to None
+        if transmitted_delta is not None and key in self.prev_transmitted_deltas:
+            # Assertions for transmitted_delta_sim calculation
+            current_transmitted_delta_flat = transmitted_delta.flatten()
+            prev_transmitted_delta_flat = self.prev_transmitted_deltas[key].flatten().to(transmitted_delta.device)
+
+            assert torch.isfinite(current_transmitted_delta_flat).all(), f"NaN/inf found in current transmitted_delta for key {key}"
+            assert torch.isfinite(prev_transmitted_delta_flat).all(), f"NaN/inf found in previous transmitted_delta for key {key}"
+
+            current_norm = torch.norm(current_transmitted_delta_flat)
+            prev_norm = torch.norm(prev_transmitted_delta_flat)
+            assert current_norm > 1e-8, f"Current transmitted_delta is zero vector for key {key}, norm: {current_norm}"
+            assert prev_norm > 1e-8, f"Previous transmitted_delta is zero vector for key {key}, norm: {prev_norm}"
+
+            transmitted_delta_sim = torch.nn.functional.cosine_similarity(
+                current_transmitted_delta_flat,
+                prev_transmitted_delta_flat,
+                dim=0,
+                eps=1e-8 # Add epsilon for numerical stability
             ).item()
         
         # Compute Eigenvalues and Store Them
@@ -168,6 +210,7 @@ class StatsLogger:
             'delta_delta_norm': delta_delta_norm,
             'activation_similarity': act_sim,
             'delta_similarity': delta_sim,
+            'transmitted_delta_similarity': transmitted_delta_sim, # Added transmitted delta similarity
             'residual': compress_residual,
             'original_size_bytes': original_size_bytes,
             'compressed_size_bytes': compressed_size_bytes,
@@ -177,6 +220,8 @@ class StatsLogger:
         self.prev_activations[key] = before_comp_activation.detach().cpu()
         if delta is not None:
             self.prev_deltas[key] = delta.detach().cpu()
+        if transmitted_delta is not None: # Store transmitted delta
+            self.prev_transmitted_deltas[key] = transmitted_delta.detach().cpu()
     
     def _compute_eigenvalues(self, tensor: torch.Tensor) -> np.ndarray:
         """
@@ -382,6 +427,11 @@ class StatsLogger:
                     if data_type in self.eigenvalues[key][step]:
                         print(f"Plotting {key} {data_type} CDF for step {step}")
                         plt.figure(figsize=(10, 6))
+                        # Check if the list is empty before accessing
+                        if not self.eigenvalues[key][step][data_type]:
+                            print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                            plt.close() # Close the empty figure
+                            continue
                         eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
                         cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
                         plt.plot(cumulative, label=f"Step {step}")
@@ -411,6 +461,11 @@ class StatsLogger:
                     print(f"Plotting {key} {data_type} CDF for step {step}")
                     plt.figure(figsize=(10, 6))
                     
+                    # Check if the list is empty before accessing
+                    if not self.eigenvalues[key][step][data_type]:
+                        print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                        plt.close() # Close the empty figure
+                        continue
                     # Sort eigenvalues and calculate cumulative distribution
                     eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
                     cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
@@ -442,6 +497,11 @@ class StatsLogger:
                     print(f"Plotting {key} {data_type} CDF for step {step}")
                     plt.figure(figsize=(10, 6))
                     
+                    # Check if the list is empty before accessing
+                    if not self.eigenvalues[key][step][data_type]:
+                        print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                        plt.close() # Close the empty figure
+                        continue
                     # Sort eigenvalues and calculate cumulative distribution
                     eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
                     cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
@@ -481,6 +541,11 @@ class StatsLogger:
             print(f"Plotting {key} {data_type} CDF for step {step}")
             plt.figure(figsize=(10, 6))
             
+            # Check if the list is empty before accessing
+            if not self.eigenvalues[key][step][data_type]:
+                print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                plt.close() # Close the empty figure
+                return # Exit the function if data is missing for the specific key/step
             # Sort eigenvalues and calculate cumulative distribution
             eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
             cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
@@ -621,8 +686,14 @@ class StatsLogger:
                         avg_delta_sim = np.mean(delta_sims)
                         similarities.append(f"delta_sim: {avg_delta_sim:.3f}")
                 
+                # Add transmitted delta similarity
+                transmitted_delta_sims = [s['transmitted_delta_similarity'] for s in stats if s.get('transmitted_delta_similarity') is not None]
+                if transmitted_delta_sims:
+                    avg_transmitted_delta_sim = np.mean(transmitted_delta_sims)
+                    similarities.append(f"tx_delta_sim: {avg_transmitted_delta_sim:.3f}") # Use tx_delta_sim for brevity
+                
                 if similarities:
-                    print(", ".join(similarities))
+                    print("  " + ", ".join(similarities)) # Indent similarity line
     
     def summary_compression_volume(self):
         """Prints the total data volume before and after compression and the ratio."""
