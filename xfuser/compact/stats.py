@@ -10,9 +10,16 @@ from typing import Optional, Dict, List, Tuple
 EIGENVALUES_PLOT_STEPS = []
 EIGENVALUES_PLOT_LAYERS = []
 
+# UV_PLOT_STEPS = [10]
+# UV_PLOT_LAYERS = [10, 20]
+UV_PLOT_STEPS = []
+UV_PLOT_LAYERS = []
+
+CALC_SIMILARITY = os.environ.get("DISABLE_STATS_SIM", None) is None
+
 class StatsLogger:
     """Simple statistics logger for compression metrics."""
-    
+
     def __init__(self):
         # Main storage for stats
         self.stats = {}
@@ -28,6 +35,55 @@ class StatsLogger:
         self.step_counts = {} 
         # Store eigenvalues for analysis
         self.eigenvalues = {}
+
+    def _compute_strided_row_similarity(self, tensor: torch.Tensor, stride: int = 1) -> Optional[float]:
+        """
+        Computes the average cosine similarity between rows separated by a stride
+        using vectorized operations.
+
+        Args:
+            tensor: A 2D tensor (N, C).
+            stride: The step size between rows to compare (default: 1 for adjacent).
+
+        Returns:
+            The average similarity, or None if N <= stride or no valid pairs found.
+        """
+        assert tensor is not None and tensor.ndim == 2, f"Invalid tensor input for strided row similarity: ndim={tensor.ndim if tensor is not None else 'None'}"
+        assert tensor.shape[0] > stride, f"Cannot compute similarity if not enough rows for the stride (stride={stride}). Shape: {tensor.shape}"
+
+        N, C = tensor.shape
+
+        # Check for non-finite values in the entire tensor first
+        assert torch.isfinite(tensor).all(), f"Non-finite values found in tensor for strided row similarity (stride={stride}). Shape: {tensor.shape}"
+
+        rows1 = tensor[:-stride, :] # Shape (N-stride, C)
+        rows2 = tensor[stride:, :]  # Shape (N-stride, C)
+
+        # Calculate norms for all relevant rows efficiently
+        norms1 = torch.linalg.norm(rows1, dim=1) # Shape (N-stride)
+        norms2 = torch.linalg.norm(rows2, dim=1) # Shape (N-stride)
+
+        # Identify pairs where either row has near-zero norm
+        valid_mask = (norms1 > 1e-8) & (norms2 > 1e-8) # Shape (N-stride)
+
+        # Handle case where no pairs are valid
+        assert valid_mask.any(), f"No valid strided row pairs found for similarity calculation (stride={stride}). Shape: {tensor.shape}"
+
+        # Select only valid rows to compute similarity
+        valid_rows1 = rows1[valid_mask]
+        valid_rows2 = rows2[valid_mask]
+
+        # Compute cosine similarity for valid pairs
+        similarities = torch.nn.functional.cosine_similarity(valid_rows1, valid_rows2, dim=1, eps=1e-8) # Shape (num_valid_pairs)
+
+        assert similarities.numel() > 0, f"Similarities tensor became empty after filtering (stride={stride}). Shape: {tensor.shape}"
+
+        avg_similarity = torch.mean(similarities)
+
+        # Final check for NaN just in case
+        assert not torch.isnan(avg_similarity), f"Average strided row similarity resulted in NaN (stride={stride}). Shape: {tensor.shape}"
+
+        return avg_similarity.item()
 
     def log(
         self,
@@ -57,11 +113,11 @@ class StatsLogger:
             dump_activations (bool): If True and path is set, dump activations.
             calc_total_error (bool): If True and path is set, calculate error against reference.
         """
-        
+
         # Increment step count for this key
         step_count = self.step_counts.get(key, 0)
         self.step_counts[key] = step_count + 1
-        
+
         # --- Dump Activations (assert path if flag is True) ---
         if dump_activations:
             # Assert that the path is provided if dumping is requested
@@ -75,10 +131,10 @@ class StatsLogger:
         # Initialize if first time
         if key not in self.stats:
             self.stats[key] = []
-        
+
         # Calculate on-the-fly compression error
         error = torch.norm(before_comp_activation - recv_activation)
-        
+
         # --- Compare with Dumped Activations (assert path if flag is True) ---
         total_error = None
         if calc_total_error:
@@ -94,17 +150,26 @@ class StatsLogger:
         # Calculate sizes
         original_size_bytes = before_comp_activation.numel() * before_comp_activation.element_size()
         compressed_size_bytes = compressed_tensor.numel() * compressed_tensor.element_size()
-        
+
         # Accumulate total volumes
         self.total_original_volume += original_size_bytes
         self.total_compressed_volume += compressed_size_bytes
-        
+
         # Calculate delta and delta-delta based on residual level
         delta = None
         delta_delta = None
         transmitted_delta = None
         transmitted_delta_sim = None
-        
+        base_delta_similarity = None
+        # Adjacent row similarities (stride=1)
+        adj1_sim_base = None
+        adj1_sim_delta = None
+        adj1_sim_tx_delta = None
+        # Strided row similarities (stride=4)
+        adj4_sim_base = None
+        adj4_sim_delta = None
+        adj4_sim_tx_delta = None
+
         if compress_residual == 0:
             pass # No deltas calculated
         elif compress_residual == 1:
@@ -120,87 +185,95 @@ class StatsLogger:
             # self.plot_counter += 1
         else:
             raise ValueError('invalid residual')
-            
+
         # Calculate norms
         act_norm = torch.norm(before_comp_activation).item()
         delta_norm = torch.norm(delta).item() if delta is not None else None
         delta_delta_norm = torch.norm(delta_delta).item() if delta_delta is not None else None
-        
+
         # Calculate similarities with previous step
         act_sim = None
         delta_sim = None
-        
-        if key in self.prev_activations:
-            # Ensure tensors are flat and on the same device for similarity
-            act_sim = torch.nn.functional.cosine_similarity(
-                before_comp_activation.flatten(), 
-                self.prev_activations[key].flatten().to(before_comp_activation.device), 
-                dim=0
-            ).item()
-            
-        if delta is not None and key in self.prev_deltas:
-             # Assertions for delta_sim calculation
-             current_delta_flat = delta.flatten()
-             prev_delta_flat = self.prev_deltas[key].flatten().to(delta.device)
 
-             assert torch.isfinite(current_delta_flat).all(), f"NaN/inf found in current delta for key {key}"
-             assert torch.isfinite(prev_delta_flat).all(), f"NaN/inf found in previous delta for key {key}"
+        if CALC_SIMILARITY:
+            # Previous step similarities
+            if key in self.prev_activations:
+                # Ensure tensors are flat and on the same device for similarity
+                act_sim = torch.nn.functional.cosine_similarity(
+                    before_comp_activation.flatten(),
+                    self.prev_activations[key].flatten().to(before_comp_activation.device),
+                    dim=0
+                ).item()
 
-             current_norm = torch.norm(current_delta_flat)
-             prev_norm = torch.norm(prev_delta_flat)
-             assert current_norm > 1e-8, f"Current delta is zero vector for key {key}, norm: {current_norm}"
-             assert prev_norm > 1e-8, f"Previous delta is zero vector for key {key}, norm: {prev_norm}"
+            if delta is not None and key in self.prev_deltas:
+                current_delta_flat = delta.flatten()
+                prev_delta_flat = self.prev_deltas[key].flatten().to(delta.device)
+                current_norm = torch.norm(current_delta_flat)
+                prev_norm = torch.norm(prev_delta_flat)
+                delta_sim = torch.nn.functional.cosine_similarity(
+                    current_delta_flat, # Use flattened tensors
+                    prev_delta_flat,
+                    dim=0,
+                    eps=1e-8 # Add epsilon for numerical stability
+                ).item()
 
-             delta_sim = torch.nn.functional.cosine_similarity(
-                current_delta_flat, # Use flattened tensors
-                prev_delta_flat,
-                dim=0,
-                eps=1e-8 # Add epsilon for numerical stability
-            ).item()
-        
-        # Calculate transmitted delta similarity
-        transmitted_delta_sim = None # Initialize to None
-        if transmitted_delta is not None and key in self.prev_transmitted_deltas:
-            # Assertions for transmitted_delta_sim calculation
-            current_transmitted_delta_flat = transmitted_delta.flatten()
-            prev_transmitted_delta_flat = self.prev_transmitted_deltas[key].flatten().to(transmitted_delta.device)
+            # Calculate transmitted delta similarity
+            if transmitted_delta is not None and key in self.prev_transmitted_deltas:
+                current_transmitted_delta_flat = transmitted_delta.flatten()
+                prev_transmitted_delta_flat = self.prev_transmitted_deltas[key].flatten().to(transmitted_delta.device)
+                current_norm = torch.norm(current_transmitted_delta_flat)
+                prev_norm = torch.norm(prev_transmitted_delta_flat)
+                transmitted_delta_sim = torch.nn.functional.cosine_similarity(
+                    current_transmitted_delta_flat,
+                    prev_transmitted_delta_flat,
+                    dim=0,
+                    eps=1e-8 # Add epsilon for numerical stability
+                ).item()
 
-            assert torch.isfinite(current_transmitted_delta_flat).all(), f"NaN/inf found in current transmitted_delta for key {key}"
-            assert torch.isfinite(prev_transmitted_delta_flat).all(), f"NaN/inf found in previous transmitted_delta for key {key}"
+            # Calculate base vs delta similarity
+            if base is not None and delta is not None:
+                base_flat = base.flatten()
+                delta_flat = delta.flatten() # Already calculated and asserted for delta_sim
+                base_norm = torch.norm(base_flat)
+                delta_norm_for_check = torch.norm(delta_flat) # Re-use already calculated norm if available
+                base_delta_similarity = torch.nn.functional.cosine_similarity(
+                    base_flat,
+                    delta_flat,
+                    dim=0,
+                    eps=1e-8 # Add epsilon for numerical stability
+                ).item()
 
-            current_norm = torch.norm(current_transmitted_delta_flat)
-            prev_norm = torch.norm(prev_transmitted_delta_flat)
-            assert current_norm > 1e-8, f"Current transmitted_delta is zero vector for key {key}, norm: {current_norm}"
-            assert prev_norm > 1e-8, f"Previous transmitted_delta is zero vector for key {key}, norm: {prev_norm}"
+            # --- Calculate Adjacent Row Similarities (Stride 1) ---
+            adj1_sim_base = self._compute_strided_row_similarity(base, stride=1)
+            adj1_sim_delta = self._compute_strided_row_similarity(delta, stride=1)
+            adj1_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=1)
 
-            transmitted_delta_sim = torch.nn.functional.cosine_similarity(
-                current_transmitted_delta_flat,
-                prev_transmitted_delta_flat,
-                dim=0,
-                eps=1e-8 # Add epsilon for numerical stability
-            ).item()
-        
+            # --- Calculate Strided Row Similarities (Stride 4) ---
+            adj4_sim_base = self._compute_strided_row_similarity(base, stride=4)
+            adj4_sim_delta = self._compute_strided_row_similarity(delta, stride=4)
+            adj4_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=4)
+
         # Compute Eigenvalues and Store Them
         layer_idx = int(key.split('-')[0])
         step_idx = self.step_counts[key]
         if step_idx in EIGENVALUES_PLOT_STEPS and layer_idx in EIGENVALUES_PLOT_LAYERS:
             if key not in self.eigenvalues:
                 self.eigenvalues[key] = {}
-            
+
             if step_idx not in self.eigenvalues[key]:
                 self.eigenvalues[key][step_idx] = {'activation': [], 'delta': [], 'delta_delta': []}
-            
+
             act_eigenvalues = self._compute_eigenvalues(before_comp_activation)
             self.eigenvalues[key][step_idx]['activation'].append(act_eigenvalues)
-            
+
             if delta is not None:
                 delta_eigenvalues = self._compute_eigenvalues(delta)
                 self.eigenvalues[key][step_idx]['delta'].append(delta_eigenvalues)
-            
+
             if delta_delta is not None:
                 delta_delta_eigenvalues = self._compute_eigenvalues(delta_delta)
                 self.eigenvalues[key][step_idx]['delta_delta'].append(delta_delta_eigenvalues)
-        
+
         # Store current stats
         self.stats[key].append({
             'error': error.item(),
@@ -211,18 +284,27 @@ class StatsLogger:
             'activation_similarity': act_sim,
             'delta_similarity': delta_sim,
             'transmitted_delta_similarity': transmitted_delta_sim, # Added transmitted delta similarity
+            'base_delta_similarity': base_delta_similarity, # Added base vs delta sim
             'residual': compress_residual,
             'original_size_bytes': original_size_bytes,
             'compressed_size_bytes': compressed_size_bytes,
+            # Adjacent row similarities
+            'adj1_sim_base': adj1_sim_base,
+            'adj1_sim_delta': adj1_sim_delta,
+            'adj1_sim_tx_delta': adj1_sim_tx_delta,
+            # Stride 4 similarities
+            'adj4_sim_base': adj4_sim_base,
+            'adj4_sim_delta': adj4_sim_delta,
+            'adj4_sim_tx_delta': adj4_sim_tx_delta,
         })
-        
+
         # Store current activations and deltas for next step similarity (on CPU to save GPU memory)
         self.prev_activations[key] = before_comp_activation.detach().cpu()
         if delta is not None:
             self.prev_deltas[key] = delta.detach().cpu()
         if transmitted_delta is not None: # Store transmitted delta
             self.prev_transmitted_deltas[key] = transmitted_delta.detach().cpu()
-    
+
     def _compute_eigenvalues(self, tensor: torch.Tensor) -> np.ndarray:
         """
         Compute eigenvalues of a tensor using SVD.
@@ -234,20 +316,15 @@ class StatsLogger:
             Array of singular values (equivalent to eigenvalues for symmetric matrices)
         """
         tensor_cpu = tensor.detach().cpu()
-        
+
         original_shape = tensor_cpu.shape
         if len(original_shape) > 2:
             tensor_2d = tensor_cpu.reshape(-1, original_shape[-1])
         else:
             tensor_2d = tensor_cpu
-            
-        try:
-            s = torch.linalg.svdvals(tensor_2d.float())
-            return s.numpy()
-        except Exception as e:
-            print(f"SVD computation failed: {e}")
-            return np.array([])
-    
+        s = torch.linalg.svdvals(tensor_2d.float())
+        return s.numpy()
+
     def plot_eigenvalue_distribution(self, 
                                      key: Optional[str] = None, 
                                      step: Optional[int] = None,
@@ -256,320 +333,21 @@ class StatsLogger:
                                      log_scale: bool = True,
                                      top_k: Optional[int] = None,
                                      num_bins: int = 100):
-        """
-        Plot the spectral density (histogram) of eigenvalues for a specific key and step(s).
-        Only plots steps defined in EIGENVALUES_PLOT_STEP when step is None or the specific step is requested.
-        
-        Args:
-            key: Layer key to plot (None to plot all keys)
-            step: Step index to plot (must be in EIGENVALUES_PLOT_STEP). If None, plot all steps in EIGENVALUES_PLOT_STEP.
-            data_type: Type of data to plot ('activation', 'delta', or 'delta_delta')
-            save_dir: Directory to save the plot (None to display)
-            log_scale: Whether to use log scale for y-axis (density)
-            top_k: Number of top eigenvalues to mention in the title (does not filter data for histogram).
-            num_bins: Number of bins for the histogram.
-        """
-        if not self.eigenvalues:
-            print("No eigenvalue data available.")
-            return
-            
-        if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
-        
-        if key is None and step is None: # Plot all eigenvalues for all target layers and target steps
-            for key in self.eigenvalues:
-                for step in self.eigenvalues[key]:
-                    if data_type in self.eigenvalues[key][step]:
-                        print(f"Plotting {key} {data_type} for step {step}")
-                        plt.figure(figsize=(10, 6))
-                        plt.hist(self.eigenvalues[key][step][data_type], bins=num_bins, density=True, 
-                                alpha=0.6, label=f"Step {step}")
-                        title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
-                        if top_k is not None:
-                            title += f" (Top {top_k} mentioned)"
-                        plt.title(title)
-                        plt.xlabel("Eigenvalue Magnitude")
-                        plt.ylabel("Spectral Density")
-                        if log_scale:
-                            plt.yscale('log')
-                        plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                        if save_dir:
-                            file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
-                            plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                            print(f"Plot saved to {file_path}")
-                            plt.clf()
-                            plt.close()
-                        else:
-                            plt.show()
-        elif key is not None and step is None: # Plot all eigenvalues for all target steps for a specific layer
-            if key not in self.eigenvalues:
-                print(f"No eigenvalue data for key {key}.")
-                return
-            for step in self.eigenvalues[key]:
-                if data_type in self.eigenvalues[key][step]:
-                    print(f"Plotting {key} {data_type} for step {step}")
-                    plt.figure(figsize=(10, 6))
-                    plt.hist(self.eigenvalues[key][step][data_type], bins=num_bins, density=True, 
-                            alpha=0.6, label=f"Step {step}")
-                    title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
-                    if top_k is not None:
-                        title += f" (Top {top_k} mentioned)"
-                    plt.title(title)
-                    plt.xlabel("Eigenvalue Magnitude")
-                    plt.ylabel("Spectral Density")
-                    if log_scale:
-                        plt.yscale('log')
-                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                    if save_dir:
-                        file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
-                        plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                        print(f"Plot saved to {file_path}")
-                        plt.clf()
-                        plt.close()
-                    else:
-                        plt.show()
-        elif key is None and step is not None: # Plot all eigenvalues for all layers for a specific step
-            for key in self.eigenvalues:
-                if step not in self.eigenvalues[key]:
-                    continue
-                if data_type in self.eigenvalues[key][step]:
-                    print(f"Plotting {key} {data_type} for step {step}")
-                    plt.figure(figsize=(10, 6))
-                    plt.hist(self.eigenvalues[key][step][data_type], bins=num_bins, density=True, 
-                            alpha=0.6, label=f"Step {step}")
-                    title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
-                    if top_k is not None:
-                        title += f" (Top {top_k} mentioned)"
-                    plt.title(title)
-                    plt.xlabel("Eigenvalue Magnitude")
-                    plt.ylabel("Spectral Density")
-                    if log_scale:
-                        plt.yscale('log')
-                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                    if save_dir:
-                        file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
-                        plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                        print(f"Plot saved to {file_path}")
-                        plt.clf()
-                        plt.close()
-                    else:
-                        plt.show()
-        elif key is not None and step is not None: # Plot eigenvalues for a specific key and step
-            if key not in self.eigenvalues:
-                print(f"No eigenvalue data for key {key}.")
-                return
-            
-            if step not in self.eigenvalues[key]:
-                print(f"No eigenvalue data for key {key} and step {step}.")
-                return
-            
-            if data_type not in self.eigenvalues[key][step] or not self.eigenvalues[key][step][data_type]:
-                print(f"No {data_type} eigenvalue data for key {key} and step {step}.")
-                return
-            
-            print(f"Plotting {key} {data_type} for step {step}")
-            plt.figure(figsize=(10, 6))
-            plt.hist(self.eigenvalues[key][step][data_type], bins=num_bins, density=True, 
-                    alpha=0.6, label=f"Step {step}")
-            title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
-            if top_k is not None:
-                title += f" (Top {top_k} mentioned)"
-            plt.title(title)
-            plt.xlabel("Eigenvalue Magnitude")
-            plt.ylabel("Spectral Density")
-            if log_scale:
-                plt.yscale('log')
-            plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-            if save_dir:
-                file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
-                plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                print(f"Plot saved to {file_path}")
-                plt.clf()
-                plt.close()
-            else:
-                plt.show()
-         
-    def plot_eigenvalue_cumsum(self, 
-                                     key: Optional[str] = None, 
-                                     step: Optional[int] = None,
-                                     data_type: str = 'activation',
-                                     save_dir: Optional[str] = None,
-                                     log_scale: bool = True,
-                                     top_k: Optional[int] = None):
-        """
-        Plot the cumulative distribution function (CDF) of eigenvalues for a specific key and step(s).
-        Only plots steps defined in EIGENVALUES_PLOT_STEP when step is None or the specific step is requested.
-        
-        Args:
-            key: Layer key to plot (None to plot all keys)
-            step: Step index to plot (must be in EIGENVALUES_PLOT_STEP). If None, plot all steps in EIGENVALUES_PLOT_STEP.
-            data_type: Type of data to plot ('activation', 'delta', or 'delta_delta')
-            save_dir: Directory to save the plot (None to display)
-            log_scale: Whether to use log scale for y-axis
-            top_k: Number of top eigenvalues to mention in the title (does not filter data for CDF).
-            num_bins: Number of bins for the histogram (used for binning before cumsum calculation).
-        """
-        if not self.eigenvalues:
-            print("No eigenvalue data available.")
-            return
-            
-        if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
-            
-        gaussian_data = np.random.normal(0, 1, (2176, 3072))
-        gaussian_eigenvalues = torch.linalg.svdvals(torch.from_numpy(gaussian_data))
-        gaussian_eigenvalues = np.sort(gaussian_eigenvalues)[::-1]
-        gaussian_cumulative = np.cumsum(gaussian_eigenvalues) / np.sum(gaussian_eigenvalues)
-        
-        if key is None and step is None: # Plot all eigenvalues for all target layers and target steps
-            for key in self.eigenvalues:
-                for step in self.eigenvalues[key]:
-                    if data_type in self.eigenvalues[key][step]:
-                        print(f"Plotting {key} {data_type} CDF for step {step}")
-                        plt.figure(figsize=(10, 6))
-                        # Check if the list is empty before accessing
-                        if not self.eigenvalues[key][step][data_type]:
-                            print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
-                            plt.close() # Close the empty figure
-                            continue
-                        eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
-                        cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
-                        plt.plot(cumulative, label=f"Step {step}")
-                        plt.plot(gaussian_cumulative, label="Gaussian distribution")
-                        title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
-                        if top_k is not None:
-                            title += f" (Top {top_k} mentioned)"
-                        plt.title(title)
-                        plt.ylabel("Cumulative Probability")
-                        if log_scale:
-                            plt.xscale('log')
-                        plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                        if save_dir:
-                            file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
-                            plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                            print(f"Plot saved to {file_path}")
-                            plt.clf()
-                            plt.close()
-                        else:
-                            plt.show()
-        elif key is not None and step is None: # Plot all eigenvalues for all target steps for a specific layer
-            if key not in self.eigenvalues:
-                print(f"No eigenvalue data for key {key}.")
-                return
-            for step in self.eigenvalues[key]:
-                if data_type in self.eigenvalues[key][step]:
-                    print(f"Plotting {key} {data_type} CDF for step {step}")
-                    plt.figure(figsize=(10, 6))
-                    
-                    # Check if the list is empty before accessing
-                    if not self.eigenvalues[key][step][data_type]:
-                        print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
-                        plt.close() # Close the empty figure
-                        continue
-                    # Sort eigenvalues and calculate cumulative distribution
-                    eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
-                    cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
-                    
-                    plt.plot(cumulative, label=f"Step {step}")
-                    plt.plot(gaussian_cumulative, label="Gaussian distribution")
-                    
-                    title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
-                    if top_k is not None:
-                        title += f" (Top {top_k} mentioned)"
-                    plt.title(title)
-                    plt.ylabel("Cumulative Probability")
-                    if log_scale:
-                        plt.xscale('log')
-                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                    if save_dir:
-                        file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
-                        plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                        print(f"Plot saved to {file_path}")
-                        plt.clf()
-                        plt.close()
-                    else:
-                        plt.show()
-        elif key is None and step is not None: # Plot all eigenvalues for all layers for a specific step
-            for key in self.eigenvalues:
-                if step not in self.eigenvalues[key]:
-                    continue
-                if data_type in self.eigenvalues[key][step]:
-                    print(f"Plotting {key} {data_type} CDF for step {step}")
-                    plt.figure(figsize=(10, 6))
-                    
-                    # Check if the list is empty before accessing
-                    if not self.eigenvalues[key][step][data_type]:
-                        print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
-                        plt.close() # Close the empty figure
-                        continue
-                    # Sort eigenvalues and calculate cumulative distribution
-                    eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
-                    cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
-                    
-                    plt.plot(cumulative, label=f"Step {step}")
-                    plt.plot(gaussian_cumulative, label="Gaussian distribution")
-                    
-                    title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
-                    if top_k is not None:
-                        title += f" (Top {top_k} mentioned)"
-                    plt.title(title)
-                    plt.ylabel("Cumulative Probability")
-                    if log_scale:
-                        plt.xscale('log')
-                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                    if save_dir:
-                        file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
-                        plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                        print(f"Plot saved to {file_path}")
-                        plt.clf()
-                        plt.close()
-                    else:
-                        plt.show()
-        elif key is not None and step is not None: # Plot eigenvalues for a specific key and step
-            if key not in self.eigenvalues:
-                print(f"No eigenvalue data for key {key}.")
-                return
-            
-            if step not in self.eigenvalues[key]:
-                print(f"No eigenvalue data for key {key} and step {step}.")
-                return
-            
-            if data_type not in self.eigenvalues[key][step] or not self.eigenvalues[key][step][data_type]:
-                print(f"No {data_type} eigenvalue data for key {key} and step {step}.")
-                return
-            
-            print(f"Plotting {key} {data_type} CDF for step {step}")
-            plt.figure(figsize=(10, 6))
-            
-            # Check if the list is empty before accessing
-            if not self.eigenvalues[key][step][data_type]:
-                print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
-                plt.close() # Close the empty figure
-                return # Exit the function if data is missing for the specific key/step
-            # Sort eigenvalues and calculate cumulative distribution
-            eigenvalues = np.sort(self.eigenvalues[key][step][data_type][0])[::-1]
-            cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
-            
-            plt.plot(cumulative, label=f"Step {step}")
-            plt.plot(gaussian_cumulative, label="Gaussian distribution")
-            
-            title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
-            if top_k is not None:
-                title += f" (Top {top_k} mentioned)"
-            plt.title(title)
-            plt.ylabel("Cumulative Probability")
-            if log_scale:
-                plt.xscale('log')
-            plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-            if save_dir:
-                file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
-                plt.savefig(file_path, dpi=300, bbox_inches='tight')
-                print(f"Plot saved to {file_path}")
-                plt.clf()
-                plt.close()
-            else:
-                plt.show()
-                
+        from xfuser.compact.plot import plot_eigenvalue_distribution
+        plot_eigenvalue_distribution(self.eigenvalues, key, step, data_type, save_dir, log_scale, top_k, num_bins)
+
+    def plot_eigenvalue_cumsum(
+        self,
+        key: Optional[str] = None,
+        step: Optional[int] = None,
+        data_type: str = "activation",
+        save_dir: Optional[str] = None,
+        log_scale: bool = True,
+        top_k: Optional[int] = None,
+    ):
+        from xfuser.compact.plot import plot_eigenvalue_cumsum
+        plot_eigenvalue_cumsum(self.eigenvalues, key, step, data_type, save_dir, log_scale, top_k)
+
     def summary_over_steps(self, steps=None, keys=None):
         """
         Print a summary of the logged statistics over steps.
@@ -581,23 +359,23 @@ class StatsLogger:
         if not self.stats:
             print("No statistics logged yet.")
             return
-        
+
         # Determine available keys
         available_keys = keys if keys is not None else self.stats.keys()
-        
+
         # Find max number of steps across all keys
         max_steps = max([len(self.stats[k]) for k in available_keys if k in self.stats], default=0)
-        
+
         # Determine which steps to report
         if steps is None:
             steps = list(range(max_steps))
-        
+
         # For each step, use summary_over_keys with a single-step range
         for step in steps:
             if step >= max_steps:
                 print(f"Step {step} is out of range")
                 continue
-                
+
             print(f"=== Step {step} ===")
             # Handle each key individually or pass None to show all keys
             if keys is None:
@@ -610,7 +388,7 @@ class StatsLogger:
                 else:
                     # If keys is a single key, pass it directly
                     self.summary_over_keys(step_range=(step, step+1), key=keys)
-    
+
     def summary_over_keys(self, step_range=None, key=None):
         """
         Print a summary of the logged statistics.
@@ -622,22 +400,22 @@ class StatsLogger:
         if not self.stats:
             print("No statistics logged yet.")
             return
-            
+
         keys = [key] if key else self.stats.keys()
-        
+
         for k in keys:
             if k not in self.stats:
                 print(f"No data for key {k}")
                 continue
-                
+
             stats_list = self.stats[k]
             if step_range:
                 stats_list = stats_list[step_range[0]:step_range[1]]
-                
+
             if not stats_list:
                 print(f"No data for key {k} in step range {step_range}")
                 continue
-                
+
             # Group by residual level
             by_residual = {}
             for stat in stats_list:
@@ -645,16 +423,16 @@ class StatsLogger:
                 if res not in by_residual:
                     by_residual[res] = []
                 by_residual[res].append(stat)
-            
+
             for res, stats in by_residual.items():
                 print(f"🔵 [{k}] res={res} (over {len(stats)} steps):")
-                
+
                 # Compute averages
                 avg_error = np.mean([s['error'] for s in stats])
                 avg_total_error_list = [s['total_error'] for s in stats if s['total_error'] is not None]
                 avg_total_error = np.mean(avg_total_error_list) if avg_total_error_list else None
                 avg_act_norm = np.mean([s['activation_norm'] for s in stats])
-                
+
                 # Print first line with error and activation norm
                 print(f"err: {avg_error:.3f}" + (f", total_err: {avg_total_error:.3f}" if avg_total_error is not None else ""), end="")
                 print(f", act={avg_act_norm:.3f}", end="")
@@ -663,38 +441,51 @@ class StatsLogger:
                     avg_delta_norm = np.mean([s['delta_norm'] for s in stats if s['delta_norm'] is not None])
                     delta_ratio = avg_delta_norm/avg_act_norm
                     print(f", delta={avg_delta_norm:.3f}, d/a={delta_ratio:.2f}", end="")
-                
+
                 if res >= 2:
                     avg_delta_delta_norm = np.mean([s['delta_delta_norm'] for s in stats if s['delta_delta_norm'] is not None])
                     if avg_delta_norm > 0:
                         dd_ratio = avg_delta_delta_norm/avg_delta_norm
                         print(f", dd={avg_delta_delta_norm:.3f}, dd/d={dd_ratio:.2f}", end="")
-                
-                print()
-                
-                # Print second line with similarities on same line if available
+
+                print() # Newline after norms
+
+                # --- Helper function for adding average stats to lists ---
+                def _add_avg_stat(stats_list, stat_key, label, target_list):
+                    values = [s[stat_key] for s in stats_list if s.get(stat_key) is not None]
+                    if values:
+                        avg_value = np.mean(values)
+                        target_list.append(f"{label}: {avg_value:.3f}")
+                # --- End Helper ---
+
+                # Calculate and format previous step similarities
                 similarities = []
-                
-                act_sims = [s['activation_similarity'] for s in stats if s['activation_similarity'] is not None]
-                if act_sims:
-                    avg_act_sim = np.mean(act_sims)
-                    similarities.append(f"act_sim: {avg_act_sim:.3f}")
-                
+                _add_avg_stat(stats, 'activation_similarity', 'act_sim', similarities)
                 if res >= 1:
-                    delta_sims = [s['delta_similarity'] for s in stats if s['delta_similarity'] is not None]
-                    if delta_sims:
-                        avg_delta_sim = np.mean(delta_sims)
-                        similarities.append(f"delta_sim: {avg_delta_sim:.3f}")
-                
-                # Add transmitted delta similarity
-                transmitted_delta_sims = [s['transmitted_delta_similarity'] for s in stats if s.get('transmitted_delta_similarity') is not None]
-                if transmitted_delta_sims:
-                    avg_transmitted_delta_sim = np.mean(transmitted_delta_sims)
-                    similarities.append(f"tx_delta_sim: {avg_transmitted_delta_sim:.3f}") # Use tx_delta_sim for brevity
-                
+                    _add_avg_stat(stats, 'delta_similarity', 'delta_sim', similarities)
+                    _add_avg_stat(stats, 'transmitted_delta_similarity', 'tx_delta_sim', similarities)
+                    _add_avg_stat(stats, 'base_delta_similarity', 'b/d_sim', similarities)
+
                 if similarities:
                     print("  " + ", ".join(similarities)) # Indent similarity line
-    
+
+                # Calculate and format strided row similarities
+                adj_sims_summary = []
+                # Stride 1
+                _add_avg_stat(stats, 'adj1_sim_base', 'a1_sim_b', adj_sims_summary)
+                if res >= 1:
+                    _add_avg_stat(stats, 'adj1_sim_delta', 'a1_sim_d', adj_sims_summary)
+                    _add_avg_stat(stats, 'adj1_sim_tx_delta', 'a1_sim_tx', adj_sims_summary)
+
+                # Stride 4
+                _add_avg_stat(stats, 'adj4_sim_base', 'a4_sim_b', adj_sims_summary)
+                if res >= 1:
+                    _add_avg_stat(stats, 'adj4_sim_delta', 'a4_sim_d', adj_sims_summary)
+                    _add_avg_stat(stats, 'adj4_sim_tx_delta', 'a4_sim_tx', adj_sims_summary)
+
+                if adj_sims_summary:
+                    print("    " + ", ".join(adj_sims_summary)) # Indent further
+
     def summary_compression_volume(self):
         """Prints the total data volume before and after compression and the ratio."""
         if self.total_original_volume == 0:
@@ -703,23 +494,23 @@ class StatsLogger:
 
         orig_mb = self.total_original_volume / (1024**2)
         comp_mb = self.total_compressed_volume / (1024**2)
-        
+
         summary_line = f"💾 Vol: Orig {orig_mb:.2f} MB"
         summary_line += f", Comp {comp_mb:.2f} MB"
-        
+
         if self.total_compressed_volume > 0:
             ratio = self.total_original_volume / self.total_compressed_volume
             summary_line += f", Ratio {ratio:.2f}x"
         else:
             summary_line += ", Ratio N/A"
-            
+
         print(summary_line)
 
     def summary_total_avg(self):
-        
+
         # Calculate average activation norm across all layers
         mean_act = np.mean([np.mean([s['activation_norm'] for s in stats]) for stats in self.stats.values()])
-        
+
         # Calculate average delta norm (for residual >= 1)
         delta_values = []
         for stats_list in self.stats.values():
@@ -727,7 +518,7 @@ class StatsLogger:
                 if s['residual'] >= 1 and s['delta_norm'] is not None:
                     delta_values.append(s['delta_norm'])
         mean_delta = np.mean(delta_values) if delta_values else None
-        
+
         # Calculate average delta-delta norm (for residual >= 2)
         dd_values = []
         for stats_list in self.stats.values():
@@ -735,14 +526,14 @@ class StatsLogger:
                 if s['residual'] >= 2 and s['delta_delta_norm'] is not None:
                     dd_values.append(s['delta_delta_norm'])
         mean_dd = np.mean(dd_values) if dd_values else None
-        
+
         # Print all averages on one line
         print(f"🟫 avg activation: {mean_act:.3f}" + 
               (f", avg delta: {mean_delta:.3f}" if mean_delta is not None else "") + 
               (f", avg delta-delta: {mean_dd:.3f}" if mean_dd is not None else ""))
-        
+
         mean_err = np.mean([np.mean([s['error'] for s in stats]) for stats in self.stats.values()])
-        
+
         # Calculate average total error if available
         total_err_values = []
         for stats_list in self.stats.values():
@@ -754,7 +545,7 @@ class StatsLogger:
         print(f"🟧 avg comp error: {mean_err:.3f}" + (f", avg total err: {mean_total_err:.3f}" if mean_total_err is not None else ", [total err not logged]"))
         from xfuser.compact.utils import get_emoji
         print(get_emoji())
-    
+
     def save_eigenvalues(self, save_dir="eigenvalues"):
         """
         Save profiled eigenvalues to a .pt file for each layer and each step.
@@ -762,10 +553,10 @@ class StatsLogger:
         if not self.eigenvalues:
             print("No eigenvalue data available.")
             return
-    
+
         # Create a directory for saving eigenvalues
         os.makedirs(save_dir, exist_ok=True)
-        
+
         # Iterate through each layer and each step
         for key, step_data in self.eigenvalues.items():
             for step, data_types in step_data.items():
@@ -773,11 +564,26 @@ class StatsLogger:
                     # Create a filename for the current layer and step
                     filename = f"{key}_{step}_{data_type}.pt"
                     filepath = os.path.join(save_dir, filename)
-                    
+
                     # Save the eigenvalues as a PyTorch tensor
                     torch.save(eigenvalues, filepath)
-        
+
         print(f"Saved eigenvalues to {save_dir}")
+
+    def plot_low_rank_factors(
+        self,
+        u: torch.Tensor,
+        v: torch.Tensor,
+        key: str,
+        step: int,
+        save_dir: str,
+    ):
+        assert step is not None, "Step is None for key {key}, cannot save U/V plot with step index."
+        layer_idx = int(key.split("-")[0])
+        if layer_idx not in UV_PLOT_LAYERS or step not in UV_PLOT_STEPS:
+            return
+        from xfuser.compact.plot import plot_low_rank_factors
+        plot_low_rank_factors(u, v, key, step, save_dir)
 
 # Global stats instance
 _stats = None
@@ -848,7 +654,7 @@ def plot_eigenvalues(key=None, step=None, data_type='activation', save_dir=None,
         _stats.plot_eigenvalue_cumsum(key, step, data_type, save_dir, log_scale, top_k)
     else:
         _stats.plot_eigenvalue_distribution(key, step, data_type, save_dir, log_scale, top_k)
-    
+
 def save_eigenvalues(save_dir="eigenvalues"):
     """
     Global function to save profiled eigenvalues.

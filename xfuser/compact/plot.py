@@ -1,9 +1,9 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from mpl_toolkits.mplot3d import Axes3D
-
+import os
 PLOT_DIR = "plots"
+from typing import Optional
 
 def plot_3d(tensor, title, filename=None):
     # Plot
@@ -17,11 +17,394 @@ def plot_3d(tensor, title, filename=None):
     ax.set_ylabel('Token')
     ax.set_zlabel('Tenor')
     plt.title(title)
-    
+
     # Save to file
     if filename is None:
         filename = f"{PLOT_DIR}/3d_{title}.png"
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close(fig)
-        
+
     return fig, ax
+
+
+def plot_low_rank_factors(
+    u: torch.Tensor,
+    v: torch.Tensor,
+    key: str,
+    step: Optional[int],
+    save_dir: Optional[str] = None,
+):
+    """
+    Plots the U and V factor matrices from low-rank decomposition.
+
+    Args:
+        u: The U factor matrix (N, K).
+        v: The V factor matrix (K, C).
+        key: The identifier for the layer/tensor.
+        step: The current step index (for filename).
+        save_dir: Directory to save the plot. If None, displays the plot.
+    """
+    if step is None:
+        raise ValueError("Step is None for key {key}, cannot save U/V plot with step index.")
+    else:
+        step_str = f"step{step}"
+
+    u_np = u.detach().cpu().float().numpy()
+    v_np = v.detach().cpu().float().numpy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    fig.suptitle(f"Low-Rank Factors for {key} ({step_str})")
+
+    # Plot U
+    im_u = axes[0].imshow(u_np, aspect="auto", cmap="viridis")
+    axes[0].set_title(f"U Matrix (Shape: {u_np.shape})")
+    axes[0].set_xlabel("Rank (K)")
+    axes[0].set_ylabel("Tokens (N)")
+    fig.colorbar(im_u, ax=axes[0])
+
+    # Plot V
+    im_v = axes[1].imshow(v_np, aspect="auto", cmap="viridis")
+    axes[1].set_title(f"V Matrix (Shape: {v_np.shape})")
+    axes[1].set_xlabel("Channels (C)")
+    axes[1].set_ylabel("Rank (K)")
+    fig.colorbar(im_v, ax=axes[1])
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to prevent title overlap
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        filename = f"{key}_{step_str}_uv.png"
+        filepath = os.path.join(save_dir, filename)
+        plt.savefig(filepath, dpi=150, bbox_inches="tight")
+        print(f"Saved U/V plot to {filepath}")
+        plt.close(fig)  # Close the figure after saving
+    else:
+        plt.show()
+
+
+def plot_eigenvalue_cumsum(
+    eigenvalues,
+    key: Optional[str] = None,
+    step: Optional[int] = None,
+    data_type: str = "activation",
+    save_dir: Optional[str] = None,
+    log_scale: bool = True,
+    top_k: Optional[int] = None,
+):
+    """
+    Plot the cumulative distribution function (CDF) of eigenvalues for a specific key and step(s).
+    Only plots steps defined in EIGENVALUES_PLOT_STEP when step is None or the specific step is requested.
+    
+    Args:
+        key: Layer key to plot (None to plot all keys)
+        step: Step index to plot (must be in EIGENVALUES_PLOT_STEP). If None, plot all steps in EIGENVALUES_PLOT_STEP.
+        data_type: Type of data to plot ('activation', 'delta', or 'delta_delta')
+        save_dir: Directory to save the plot (None to display)
+        log_scale: Whether to use log scale for y-axis
+        top_k: Number of top eigenvalues to mention in the title (does not filter data for CDF).
+        num_bins: Number of bins for the histogram (used for binning before cumsum calculation).
+    """
+    if not eigenvalues:
+        print("No eigenvalue data available.")
+        return
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
+    gaussian_data = np.random.normal(0, 1, (2176, 3072))
+    gaussian_eigenvalues = torch.linalg.svdvals(torch.from_numpy(gaussian_data))
+    gaussian_eigenvalues = np.sort(gaussian_eigenvalues)[::-1]
+    gaussian_cumulative = np.cumsum(gaussian_eigenvalues) / np.sum(gaussian_eigenvalues)
+
+    if key is None and step is None: # Plot all eigenvalues for all target layers and target steps
+        for key in eigenvalues:
+            for step in eigenvalues[key]:
+                if data_type in eigenvalues[key][step]:
+                    print(f"Plotting {key} {data_type} CDF for step {step}")
+                    plt.figure(figsize=(10, 6))
+                    # Check if the list is empty before accessing
+                    if not eigenvalues[key][step][data_type]:
+                        print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                        plt.close() # Close the empty figure
+                        continue
+                    eigenvalues = np.sort(eigenvalues[key][step][data_type][0])[::-1]
+                    cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
+                    plt.plot(cumulative, label=f"Step {step}")
+                    plt.plot(gaussian_cumulative, label="Gaussian distribution")
+                    title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
+                    if top_k is not None:
+                        title += f" (Top {top_k} mentioned)"
+                    plt.title(title)
+                    plt.ylabel("Cumulative Probability")
+                    if log_scale:
+                        plt.xscale('log')
+                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                    if save_dir:
+                        file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
+                        plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                        print(f"Plot saved to {file_path}")
+                        plt.clf()
+                        plt.close()
+                    else:
+                        plt.show()
+    elif key is not None and step is None: # Plot all eigenvalues for all target steps for a specific layer
+        if key not in eigenvalues:
+            print(f"No eigenvalue data for key {key}.")
+            return
+        for step in eigenvalues[key]:
+            if data_type in eigenvalues[key][step]:
+                print(f"Plotting {key} {data_type} CDF for step {step}")
+                plt.figure(figsize=(10, 6))
+
+                # Check if the list is empty before accessing
+                if not eigenvalues[key][step][data_type]:
+                    print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                    plt.close() # Close the empty figure
+                    continue
+                # Sort eigenvalues and calculate cumulative distribution
+                eigenvalues = np.sort(eigenvalues[key][step][data_type][0])[::-1]
+                cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
+
+                plt.plot(cumulative, label=f"Step {step}")
+                plt.plot(gaussian_cumulative, label="Gaussian distribution")
+
+                title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
+                if top_k is not None:
+                    title += f" (Top {top_k} mentioned)"
+                plt.title(title)
+                plt.ylabel("Cumulative Probability")
+                if log_scale:
+                    plt.xscale('log')
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                if save_dir:
+                    file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
+                    plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                    print(f"Plot saved to {file_path}")
+                    plt.clf()
+                    plt.close()
+                else:
+                    plt.show()
+    elif key is None and step is not None: # Plot all eigenvalues for all layers for a specific step
+        for key in eigenvalues:
+            if step not in eigenvalues[key]:
+                continue
+            if data_type in eigenvalues[key][step]:
+                print(f"Plotting {key} {data_type} CDF for step {step}")
+                plt.figure(figsize=(10, 6))
+
+                # Check if the list is empty before accessing
+                if not eigenvalues[key][step][data_type]:
+                    print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+                    plt.close() # Close the empty figure
+                    continue
+                # Sort eigenvalues and calculate cumulative distribution
+                eigenvalues = np.sort(eigenvalues[key][step][data_type][0])[::-1]
+                cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
+
+                plt.plot(cumulative, label=f"Step {step}")
+                plt.plot(gaussian_cumulative, label="Gaussian distribution")
+
+                title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
+                if top_k is not None:
+                    title += f" (Top {top_k} mentioned)"
+                plt.title(title)
+                plt.ylabel("Cumulative Probability")
+                if log_scale:
+                    plt.xscale('log')
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                if save_dir:
+                    file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
+                    plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                    print(f"Plot saved to {file_path}")
+                    plt.clf()
+                    plt.close()
+                else:
+                    plt.show()
+    elif key is not None and step is not None: # Plot eigenvalues for a specific key and step
+        if key not in eigenvalues:
+            print(f"No eigenvalue data for key {key}.")
+            return
+
+        if step not in eigenvalues[key]:
+            print(f"No eigenvalue data for key {key} and step {step}.")
+            return
+
+        if data_type not in eigenvalues[key][step] or not eigenvalues[key][step][data_type]:
+            print(f"No {data_type} eigenvalue data for key {key} and step {step}.")
+            return
+
+        print(f"Plotting {key} {data_type} CDF for step {step}")
+        plt.figure(figsize=(10, 6))
+
+        # Check if the list is empty before accessing
+        if not eigenvalues[key][step][data_type]:
+            print(f"Skipping empty eigenvalue data for {key}, step {step}, type {data_type}")
+            plt.close() # Close the empty figure
+            return # Exit the function if data is missing for the specific key/step
+        # Sort eigenvalues and calculate cumulative distribution
+        eigenvalues = np.sort(eigenvalues[key][step][data_type][0])[::-1]
+        cumulative = np.cumsum(eigenvalues) / np.sum(eigenvalues)
+
+        plt.plot(cumulative, label=f"Step {step}")
+        plt.plot(gaussian_cumulative, label="Gaussian distribution")
+
+        title = f"{key} {data_type.capitalize()} Eigenvalue CDF (Step {step})"
+        if top_k is not None:
+            title += f" (Top {top_k} mentioned)"
+        plt.title(title)
+        plt.ylabel("Cumulative Probability")
+        if log_scale:
+            plt.xscale('log')
+        plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+        if save_dir:
+            file_path = os.path.join(save_dir, f"{key}_{data_type}_cdf_step{step}.png")
+            plt.savefig(file_path, dpi=300, bbox_inches='tight')
+            print(f"Plot saved to {file_path}")
+            plt.clf()
+            plt.close()
+        else:
+            plt.show()
+
+
+def plot_eigenvalue_distribution(
+    eigenvalues,
+    key: Optional[str] = None,
+    step: Optional[int] = None,
+    data_type: str = "activation",
+    save_dir: Optional[str] = None,
+    log_scale: bool = True,
+    top_k: Optional[int] = None,
+    num_bins: int = 100,
+):
+    """
+    Plot the spectral density (histogram) of eigenvalues for a specific key and step(s).
+    Only plots steps defined in EIGENVALUES_PLOT_STEP when step is None or the specific step is requested.
+    
+    Args:
+        key: Layer key to plot (None to plot all keys)
+        step: Step index to plot (must be in EIGENVALUES_PLOT_STEP). If None, plot all steps in EIGENVALUES_PLOT_STEP.
+        data_type: Type of data to plot ('activation', 'delta', or 'delta_delta')
+        save_dir: Directory to save the plot (None to display)
+        log_scale: Whether to use log scale for y-axis (density)
+        top_k: Number of top eigenvalues to mention in the title (does not filter data for histogram).
+        num_bins: Number of bins for the histogram.
+    """
+    if not eigenvalues:
+        print("No eigenvalue data available.")
+        return
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
+    if key is None and step is None: # Plot all eigenvalues for all target layers and target steps
+        for key in eigenvalues:
+            for step in eigenvalues[key]:
+                if data_type in eigenvalues[key][step]:
+                    print(f"Plotting {key} {data_type} for step {step}")
+                    plt.figure(figsize=(10, 6))
+                    plt.hist(eigenvalues[key][step][data_type], bins=num_bins, density=True, 
+                            alpha=0.6, label=f"Step {step}")
+                    title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
+                    if top_k is not None:
+                        title += f" (Top {top_k} mentioned)"
+                    plt.title(title)
+                    plt.xlabel("Eigenvalue Magnitude")
+                    plt.ylabel("Spectral Density")
+                    if log_scale:
+                        plt.yscale('log')
+                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                    if save_dir:
+                        file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
+                        plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                        print(f"Plot saved to {file_path}")
+                        plt.clf()
+                        plt.close()
+                    else:
+                        plt.show()
+    elif key is not None and step is None: # Plot all eigenvalues for all target steps for a specific layer
+        if key not in eigenvalues:
+            print(f"No eigenvalue data for key {key}.")
+            return
+        for step in eigenvalues[key]:
+            if data_type in eigenvalues[key][step]:
+                print(f"Plotting {key} {data_type} for step {step}")
+                plt.figure(figsize=(10, 6))
+                plt.hist(eigenvalues[key][step][data_type], bins=num_bins, density=True, 
+                        alpha=0.6, label=f"Step {step}")
+                title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
+                if top_k is not None:
+                    title += f" (Top {top_k} mentioned)"
+                plt.title(title)
+                plt.xlabel("Eigenvalue Magnitude")
+                plt.ylabel("Spectral Density")
+                if log_scale:
+                    plt.yscale('log')
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                if save_dir:
+                    file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
+                    plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                    print(f"Plot saved to {file_path}")
+                    plt.clf()
+                    plt.close()
+                else:
+                    plt.show()
+    elif key is None and step is not None: # Plot all eigenvalues for all layers for a specific step
+        for key in eigenvalues:
+            if step not in eigenvalues[key]:
+                continue
+            if data_type in eigenvalues[key][step]:
+                print(f"Plotting {key} {data_type} for step {step}")
+                plt.figure(figsize=(10, 6))
+                plt.hist(eigenvalues[key][step][data_type], bins=num_bins, density=True, 
+                        alpha=0.6, label=f"Step {step}")
+                title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
+                if top_k is not None:
+                    title += f" (Top {top_k} mentioned)"
+                plt.title(title)
+                plt.xlabel("Eigenvalue Magnitude")
+                plt.ylabel("Spectral Density")
+                if log_scale:
+                    plt.yscale('log')
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                if save_dir:
+                    file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
+                    plt.savefig(file_path, dpi=300, bbox_inches='tight')
+                    print(f"Plot saved to {file_path}")
+                    plt.clf()
+                    plt.close()
+                else:
+                    plt.show()
+    elif key is not None and step is not None: # Plot eigenvalues for a specific key and step
+        if key not in eigenvalues:
+            print(f"No eigenvalue data for key {key}.")
+            return
+
+        if step not in eigenvalues[key]:
+            print(f"No eigenvalue data for key {key} and step {step}.")
+            return
+
+        if data_type not in eigenvalues[key][step] or not eigenvalues[key][step][data_type]:
+            print(f"No {data_type} eigenvalue data for key {key} and step {step}.")
+            return
+
+        print(f"Plotting {key} {data_type} for step {step}")
+        plt.figure(figsize=(10, 6))
+        plt.hist(eigenvalues[key][step][data_type], bins=num_bins, density=True, 
+                alpha=0.6, label=f"Step {step}")
+        title = f"{key} {data_type.capitalize()} Spectral Density (Step {step})"
+        if top_k is not None:
+            title += f" (Top {top_k} mentioned)"
+        plt.title(title)
+        plt.xlabel("Eigenvalue Magnitude")
+        plt.ylabel("Spectral Density")
+        if log_scale:
+            plt.yscale('log')
+        plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+        if save_dir:
+            file_path = os.path.join(save_dir, f"{key}_{data_type}_step{step}.png")
+            plt.savefig(file_path, dpi=300, bbox_inches='tight')
+            print(f"Plot saved to {file_path}")
+            plt.clf()
+            plt.close()
+        else:
+            plt.show()
