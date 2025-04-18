@@ -69,10 +69,11 @@ def compact_fwd(
             q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_attn_probs,
             deterministic, attn_layer, group, joint_tensor_key, joint_tensor_value, joint_strategy, mod_idx, current_iter
         )
-AWL = True # attn aware lowrank
+AWL = False # attn aware lowrank
 AWL_RANDOM_PERM = True # testing random scaling
-
-def compact_update_awl_scale(q, k):
+AWL_BORDER = False
+AWL_V_NORM = False
+def compact_update_awl_scale(q, k, v):
     # (bs, seq_len, head_cnt, head_size)
     """
     Calculates key token importance by sampling queries and computing attention scores.
@@ -113,6 +114,18 @@ def compact_update_awl_scale(q, k):
         # lets perform a random perm here to test a random scale
         if AWL_RANDOM_PERM:
             token_scale = token_scale[torch.randperm(bs * seq_len)]
+        
+        if AWL_BORDER:
+            # lets scale tokens segments at the end 
+            token_scale = torch.ones_like(key_token_importance)
+            token_scale[:int(bs * seq_len * 0.1)] = 2
+            token_scale[int(bs * seq_len * 0.9):] = 2
+        if AWL_V_NORM:
+            # set scale according to v norm
+            v_norm = torch.norm(v.view(bs * seq_len, -1), dim=-1).flatten()
+            token_scale = v_norm.mean() / v_norm 
+            # token_scale = v_norm / v_norm.mean()
+            # print(f"v_norm 1%: {v_norm.float().quantile(0.01):.4f}, 99%: {v_norm.float().quantile(0.99):.4f}")
         set_current_lowrank_scale(token_scale)
 
 @Profiler.prof_func("compact._compact_ring_fwd")
@@ -173,7 +186,7 @@ def _compact_ring_fwd(
     k = k.contiguous()
     v = v.contiguous()
     if AWL: 
-        compact_update_awl_scale(q, k)
+        compact_update_awl_scale(q, k, v)
     out = None
     lse = None
 
