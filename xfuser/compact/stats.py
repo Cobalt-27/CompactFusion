@@ -17,6 +17,7 @@ UV_PLOT_LAYERS = []
 
 # env var: ENABLE_STATS_SIM
 CALC_SIMILARITY = os.environ.get("ENABLE_STATS_SIM", "0") == "1"
+PRINT_ALL_ERROR = os.environ.get("PRINT_ALL_ERROR", "0") == "1"
 
 class StatsLogger:
     """Simple statistics logger for compression metrics."""
@@ -428,7 +429,11 @@ class StatsLogger:
 
             for res, stats in by_residual.items():
                 print(f"🔵 [{k}] res={res} (over {len(stats)} steps):")
-
+                # print ALL error
+                if PRINT_ALL_ERROR:
+                    all_error = [s['error'] for s in stats]
+                    print(f"all error: {all_error}")
+                
                 # Compute averages
                 avg_error = np.mean([s['error'] for s in stats])
                 avg_total_error_list = [s['total_error'] for s in stats if s['total_error'] is not None]

@@ -99,8 +99,6 @@ def compact_reset():
     if _config.override_with_patch_gather_fwd:
         global _allgather_cache
         _allgather_cache = AllGatherCache()
-    from xfuser.compact.slowpath import set_current_lowrank_scale
-    # set_current_lowrank_scale(None)
     global _current_cache_key
     _current_cache_key = None
 

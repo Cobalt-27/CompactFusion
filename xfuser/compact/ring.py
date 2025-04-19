@@ -31,8 +31,7 @@ except ImportError:
     flash_attn = None
     _flash_attn_forward = None
     from yunchang.kernels.attention import pytorch_attn_forward
-    
-from xfuser.compact.slowpath import set_current_lowrank_scale
+
 
 def compact_fwd(
     q: torch.Tensor,
@@ -69,48 +68,6 @@ def compact_fwd(
             q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_attn_probs,
             deterministic, attn_layer, group, joint_tensor_key, joint_tensor_value, joint_strategy, mod_idx, current_iter
         )
-AWL = True # attn aware lowrank
-AWL_RAND = True
-def compact_update_awl_scale(q, k, v):
-    # (bs, seq_len, head_cnt, head_size)
-    """
-    Calculates key token importance by sampling queries and computing attention scores.
-
-    Args:
-        q: Query tensor (bs, seq_len, head_cnt, head_size)
-        k: Key tensor (bs, seq_len, head_cnt, head_size)
-    """
-    if not AWL:
-        return
-    with torch.no_grad(): # No need to track gradients for importance calculation
-        if not AWL_RAND:
-            bs, seq_len, head_cnt, head_size = q.shape
-            q_2d = q.view(bs * seq_len, head_cnt * head_size)
-            q_chan_mean = torch.mean(q_2d.abs(), dim=0).flatten().float()
-            q_chan_mean = q_chan_mean / q_chan_mean.norm()
-            lowrank_scale_k = q_chan_mean
-            # print percentile
-            # print(f"q_chan_mean 1%: {q_chan_mean.quantile(0.01):.4f}, 99%: {q_chan_mean.quantile(0.99):.4f}")
-            # if AWL_SCALE_V:
-            v_2d = v.view(bs * seq_len, head_cnt * head_size)
-            v_norm = torch.norm(v_2d, dim=-1).flatten()
-            lowrank_scale_v = v_norm.mean() / v_norm
-            lowrank_scale_v = lowrank_scale_v.flatten()
-            set_current_lowrank_scale(lowrank_scale_k, lowrank_scale_v)
-            return
-        else:
-            bs, seq_len, head_cnt, head_size = q.shape
-            random_scale = torch.ones(bs * seq_len)
-            # Randomly select 10% of the elements and set them to 10
-            mask = torch.zeros(bs * seq_len, device=q.device, dtype=torch.bool)
-            num_elements = bs * seq_len
-            num_to_select = int(0.1 * num_elements)  # 10% of elements
-            # Get random indices
-            indices = torch.randperm(num_elements, device=q.device)[:num_to_select]
-            mask.scatter_(0, indices, True)
-            # Create a tensor with 10s where mask is True, and original values elsewhere
-            random_scale = torch.where(mask, torch.tensor(10.0, device=q.device), torch.ones_like(mask, device=q.device, dtype=torch.float32))
-            set_current_lowrank_scale(random_scale, random_scale)
         
 @Profiler.prof_func("compact._compact_ring_fwd")
 def _compact_ring_fwd(
@@ -169,8 +126,7 @@ def _compact_ring_fwd(
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    if AWL: 
-        compact_update_awl_scale(q, k, v)
+
     out = None
     lse = None
 
