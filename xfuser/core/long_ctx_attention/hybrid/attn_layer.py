@@ -57,8 +57,9 @@ class xFuserLongContextAttention(LongContextAttention):
         COMPACT ATTN
         """
         from xfuser.compact.main import compact_config
+        from xfuser.compact.ring import compact_fwd
         if compact_config().enabled:
-            self.ring_attn_fn = None
+            self.ring_attn_fn = compact_fwd
         else:
             self.ring_attn_fn = xdit_ring_flash_attn_func
         self.idx = None # NOTE: assign idx in forward
@@ -176,11 +177,19 @@ class xFuserLongContextAttention(LongContextAttention):
             global ATTN_LAYER_IDX
             self.idx = ATTN_LAYER_IDX
             ATTN_LAYER_IDX += 1
+        
+        """
+        Collector for Q, K, V, Layer/Step Specific
+        """
         from xfuser.compact.main import compact_config, compact_get_step
-        from xfuser.compact.ring import compact_fwd
+        from xfuser.collector.collector import collect
+        collect(query_layer, "q", compact_get_step(), self.idx)
+        collect(key_layer, "k", compact_get_step(), self.idx)
+        collect(value_layer, "v", compact_get_step(), self.idx)
+        
         if compact_config().enabled:
             # assert not self.use_kv_cache
-            out = compact_fwd(
+            out = self.ring_attn_fn(
                 query_layer,
                 key_layer,
                 value_layer,
@@ -197,7 +206,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 joint_tensor_value=joint_tensor_value,
                 joint_strategy=joint_strategy,
                 mod_idx=self.idx,
-                current_iter=compact_get_step(),
+                current_iter=compact_get_step()
             )
         else:
             out = self.ring_attn_fn(

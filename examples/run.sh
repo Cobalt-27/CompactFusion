@@ -1,6 +1,10 @@
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
+export COMPACT_TEST_ENABLE=True
+export COMPACT_TEST_MODEL="Flux"
+export COMPACT_TEST_METHOD="binary"
+export COMPACT_TEST_LOOP=1
 
 # Select the model type
 export MODEL_TYPE="Flux"

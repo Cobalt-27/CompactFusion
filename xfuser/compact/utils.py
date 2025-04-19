@@ -123,10 +123,18 @@ class CompactCache:
         # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-        # if key in self.base:
-        #     self.base[key] = base
-        # else:
-        self.base[key] = base
+            
+        from xfuser.compact.main import compact_get_step
+        from xfuser.collector.collector import collect
+        if "k" in key:
+            collect(base, "kbase", compact_get_step(), int(key.split("-")[0]))
+        elif "v" in key:
+            collect(base, "vbase", compact_get_step(), int(key.split("-")[0]))
+        
+        if key in self.base:
+            self.base[key].copy_(base)
+        else:
+            self.base[key] = base
 
         # Compress or store delta_base
         if delta_base is not None:
