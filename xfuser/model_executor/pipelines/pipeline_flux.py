@@ -475,7 +475,13 @@ class xFuserFluxPipeline(xFuserPipelineBaseWrapper):
             #     guidance = guidance.expand(latents.shape[0])
             # else:
             #     guidance = None
-
+            """
+            Collector for Latents, Step Specific
+            """
+            from xfuser.collector.collector import collect
+            from xfuser.compact.main import compact_get_step
+            collect(latents, "latents", compact_get_step(), None)
+            
             latents, encoder_hidden_state = self._backbone_forward(
                 latents=latents,
                 encoder_hidden_states=(

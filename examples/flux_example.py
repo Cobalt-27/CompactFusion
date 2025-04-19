@@ -112,6 +112,17 @@ def main():
         logging.info(f"rank {local_rank} sequential CPU offload enabled")
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
+        
+        
+    from xfuser.collector.collector import Collector, init
+    collector = Collector(
+        save_dir="./results/collector", 
+        target_steps=None,
+        target_layers=None,
+        enabled=True,
+        rank=local_rank
+    )
+    init(collector)
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
