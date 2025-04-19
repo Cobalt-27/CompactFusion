@@ -51,7 +51,7 @@ def _flux_binary_config():
     return CompactConfig(
         enabled=True,
         compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
-        comp_rank=1,
+        comp_rank=-1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False,
@@ -142,7 +142,7 @@ def _pixart_binary_config():
     return CompactConfig(
         enabled=True,
         compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
-        comp_rank=1,
+        comp_rank=-1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False,
