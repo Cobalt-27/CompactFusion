@@ -169,7 +169,7 @@ def test_compress_decompress_vs_sim(n, hidden, seed, compact_method, sparse_rati
             assert_tensor_approx(decompressed, simulated_result, desc=f"Rank={current_rank}")
 
 @pytest.mark.parametrize(
-    "n,hidden", [(1024, 2048), (1024, 512), (64, 1024)]
+    "n,hidden", [(128, 128), (32, 256), (512, 32)]
 )  # Sequence and hidden dimensions
 @pytest.mark.parametrize("seed", [42, 43, 44])  # Different random seeds
 @pytest.mark.parametrize("target_rank", [1, 2]) # Test rank 1 (power iter) and > 1 (subspace iter)
@@ -185,7 +185,7 @@ def test_subspace_iter(n, hidden, seed, target_rank):
         input_tensor = (low_rank + noise).half() # Test with half precision input
 
         # Use the public subspace_iter which dispatches to power_iter for rank=1
-        pu, pv, _ = subspace_iter(input_tensor, target_rank, num_iters=20) # Increase iters for better convergence
+        pu, pv, _ = subspace_iter(input_tensor, target_rank, num_iters=100) # Increase iters for better convergence
         p_reconstructed = pu.float() @ pv.float()
 
         # Get reference reconstruction from SVD

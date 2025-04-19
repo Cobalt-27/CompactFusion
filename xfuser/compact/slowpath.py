@@ -20,11 +20,13 @@ from xfuser.compact.utils import (
     CompactCache,
     COMPACT_COMPRESS_TYPE,
 )
-_current_lowrank_scale = None #size 
+_current_lowrank_scale_k = None #size (C,) or (N,)
+_current_lowrank_scale_v = None #size (C,) or (N,)
 
-def set_current_lowrank_scale(scale: torch.Tensor):
-    global _current_lowrank_scale
-    _current_lowrank_scale = scale
+def set_current_lowrank_scale(scale_k, scale_v):
+    global _current_lowrank_scale_k, _current_lowrank_scale_v
+    _current_lowrank_scale_k = scale_k
+    _current_lowrank_scale_v = scale_v
 
 def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, rank: int = None, sparse_ratio: int = None):
     """
@@ -57,13 +59,22 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK compression"
         # assert shape
+        from xfuser.compact.main import compact_get_current_cache_key
+        cache_key = compact_get_current_cache_key()
+        is_k = cache_key.split("-")[-1] == 'k'
+        current_lowrank_scale = _current_lowrank_scale_k if is_k else _current_lowrank_scale_v
         
-        if _current_lowrank_scale is not None:
-            assert _current_lowrank_scale.shape == (N,)
-            x = x.float() * _current_lowrank_scale.view(N, 1)
+        if current_lowrank_scale is not None:
+            if current_lowrank_scale.shape == (C,):
+                x = x.float() * current_lowrank_scale.view(1, C)
+            elif current_lowrank_scale.shape == (N,):
+                x = x.float() * current_lowrank_scale.view(N, 1)
         u, v, _ = subspace_iter(x, rank, 2)
-        if _current_lowrank_scale is not None:
-            u = u / _current_lowrank_scale.view(N, 1)
+        if current_lowrank_scale is not None:
+            if current_lowrank_scale.shape == (C,):
+                v = v / current_lowrank_scale.view(1, C)
+            elif current_lowrank_scale.shape == (N,):
+                u = u / current_lowrank_scale.view(N, 1)
         u = u.half()
         v = v.half()
         assert u.size(1) == v.size(0) and u.dtype == torch.half and v.dtype == torch.half
@@ -165,7 +176,23 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         return sim_topk(x, sparse_ratio)
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY:
         assert rank is not None
-        return sim_binary(x, rank=rank)
+        from xfuser.compact.main import compact_get_current_cache_key
+        cache_key = compact_get_current_cache_key()
+        is_k = cache_key.split("-")[-1] == 'k'
+        current_lowrank_scale = _current_lowrank_scale_k if is_k else _current_lowrank_scale_v
+        N, C = x.shape
+        if current_lowrank_scale is not None:
+            if current_lowrank_scale.shape == (C,):
+                x = x.float() * current_lowrank_scale.view(1, C)
+            elif current_lowrank_scale.shape == (N,):
+                x = x.float() * current_lowrank_scale.view(N, 1)
+        quant_x = sim_binary(x.half(), rank=rank)
+        if current_lowrank_scale is not None:
+            if current_lowrank_scale.shape == (C,):
+                quant_x = quant_x / current_lowrank_scale.view(1, C)
+            elif current_lowrank_scale.shape == (N,):
+                quant_x = quant_x / current_lowrank_scale.view(N, 1)
+        return quant_x.half()
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         return sim_int2(x)
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:

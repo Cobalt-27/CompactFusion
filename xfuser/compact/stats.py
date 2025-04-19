@@ -15,7 +15,8 @@ EIGENVALUES_PLOT_LAYERS = []
 UV_PLOT_STEPS = []
 UV_PLOT_LAYERS = []
 
-CALC_SIMILARITY = os.environ.get("DISABLE_STATS_SIM", None) is None
+# env var: ENABLE_STATS_SIM
+CALC_SIMILARITY = os.environ.get("ENABLE_STATS_SIM", "0") == "1"
 
 class StatsLogger:
     """Simple statistics logger for compression metrics."""
@@ -202,7 +203,8 @@ class StatsLogger:
                 act_sim = torch.nn.functional.cosine_similarity(
                     before_comp_activation.flatten(),
                     self.prev_activations[key].flatten().to(before_comp_activation.device),
-                    dim=0
+                    dim=0,
+                    eps=1e-8 # Add epsilon for numerical stability
                 ).item()
 
             if delta is not None and key in self.prev_deltas:

@@ -47,13 +47,13 @@ def customized_compact_config():
         patch_gather_fwd_config=patch_config,
         compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-        comp_rank=2,
+        comp_rank=16 if not COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
-        simulate=False,
-        log_stats=False,
+        simulate=True or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
+        log_stats=True,
         check_consist=False,
-        fastpath=True,
+        fastpath=False and COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY,
         ref_activation_path='ref_activations',
         dump_activations=False,
         calc_total_error=False,
@@ -115,7 +115,7 @@ def main():
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
-    pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
+    pipe.prepare_run(input_config, steps=5)
     if local_rank == 0:
         print(f"prepare run finished")
     if local_rank == 0:
@@ -124,7 +124,7 @@ def main():
     if TEST_ENABLE:
         LOOP_COUNT = TEST_LOOP
     else:
-        LOOP_COUNT = 4
+        LOOP_COUNT = 1
 
     for i in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
