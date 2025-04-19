@@ -20,11 +20,6 @@ from xfuser.compact.utils import (
     CompactCache,
     COMPACT_COMPRESS_TYPE,
 )
-_current_lowrank_scale = None #size 
-
-def set_current_lowrank_scale(scale: torch.Tensor):
-    global _current_lowrank_scale
-    _current_lowrank_scale = scale
 
 def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, rank: int = None, sparse_ratio: int = None):
     """
@@ -57,13 +52,7 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK compression"
         # assert shape
-        
-        if _current_lowrank_scale is not None:
-            assert _current_lowrank_scale.shape == (N,)
-            x = x.float() * _current_lowrank_scale.view(N, 1)
         u, v, _ = subspace_iter(x, rank, 2)
-        if _current_lowrank_scale is not None:
-            u = u / _current_lowrank_scale.view(N, 1)
         u = u.half()
         v = v.half()
         assert u.size(1) == v.size(0) and u.dtype == torch.half and v.dtype == torch.half
@@ -165,7 +154,8 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         return sim_topk(x, sparse_ratio)
     elif compress_type == COMPACT_COMPRESS_TYPE.BINARY:
         assert rank is not None
-        return sim_binary(x, rank=rank)
+        quant_x = sim_binary(x.half(), rank=rank)
+        return quant_x.half()
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         return sim_int2(x)
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:

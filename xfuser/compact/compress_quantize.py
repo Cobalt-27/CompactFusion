@@ -43,7 +43,9 @@ def quantize_1bit(
         # scale_v (1, C) contains the mean scales
         scale_v_kc = mean_scale_c.unsqueeze(0).contiguous().to(torch.half) # (1, C)
         # scale_u (N, 1) contains ones
-        scale_u_nk = torch.ones((N, 1), device=input_tensor.device, dtype=torch.half) # (N, 1)
+        # scale_u_nk = torch.ones((N, 1), device=input_tensor.device, dtype=torch.half) # (N, 1)
+        scale_u_nk = torch.mean(input_abs_nc, dim=1, keepdim=True) # (N, 1)
+        scale_u_nk = scale_u_nk / scale_u_nk.mean(dim=0, keepdim=True)
         effective_rank = 1 # For assertion checks later
     else: # rank >= 1
         # Calculate rank-k approximation of abs(input)
@@ -311,7 +313,11 @@ def sim_binary(input_tensor: torch.Tensor, rank: int|None = None) -> torch.Tenso
     # NOTE: must use mean, otherwise the dequantized tensor's norm is too large, resulting nonsensical output
     if rank == -1:
         # Calculate channel-wise mean scale (reduction over N dimension)
-        scale = torch.mean(torch.abs(input_tensor), dim=0, keepdim=True) # Shape (1, C)
+        abs_input = torch.abs(input_tensor)
+        chan_scale = torch.mean(abs_input, dim=0, keepdim=True) # Shape (1, C)
+        tok_scale = torch.mean(abs_input, dim=1, keepdim=True) # Shape (N, 1)
+        tok_scale = tok_scale / tok_scale.mean()
+        scale = chan_scale * tok_scale
     else: # rank >= 1
         from xfuser.compact.compress_lowrank import svd, subspace_iter
         RANK=rank
@@ -425,3 +431,51 @@ def dequantize_int8(q_tensor, scale, zero_point):
      dequantized_tensor = (q_tensor.half() - zero_point.half()) * scale
      assert dequantized_tensor.dtype == torch.half
      return dequantized_tensor
+
+
+def sim_int4(input_tensor: torch.Tensor, dim) -> torch.Tensor:
+    """
+    Simulates channel-wise INT4 quantization with zero-centered, min-max-based scaling.
+    """
+    assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
+    # assert input_tensor.dtype == torch.half, "Input tensor must be FP16"
+    dtype = input_tensor.dtype
+    input_float32 = input_tensor.float()
+    val_max = torch.max(input_float32, dim=dim, keepdim=True)[0]
+    val_min = torch.min(input_float32, dim=dim, keepdim=True)[0]
+    scale = (val_max - val_min) / 15
+    scale = torch.where(scale > 1e-8, scale, torch.ones_like(scale) * 1e-8)
+    zero_point_offset = torch.round(val_min / scale)
+
+    # Quantize
+    quantized_vals = torch.round((input_float32 - val_min) / scale)
+    # Clamp to [0, 15] range first
+    quantized_vals = torch.clamp(quantized_vals, min=0, max=15)
+    # Shift to represent [-8, 7] if needed, but let's keep it [0, 15] for simplicity of dequant
+    # Store as int8 as there's no int4 type
+    dequantized_vals = quantized_vals * scale + val_min
+    return dequantized_vals.to(dtype) # Return in original dtype
+
+
+def sim_int2_minmax(input_tensor: torch.Tensor, dim) -> torch.Tensor:
+    """
+    Simulates channel-wise INT2 quantization with min-max-based scaling.
+    """
+    assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
+    # assert input_tensor.dtype == torch.half, "Input tensor must be FP16"
+    dtype = input_tensor.dtype
+    input_float32 = input_tensor.float()
+    val_max = torch.max(input_float32, dim=dim, keepdim=True)[0]
+    val_min = torch.min(input_float32, dim=dim, keepdim=True)[0]
+    scale = (val_max - val_min) / 3
+    scale = torch.where(scale > 1e-8, scale, torch.ones_like(scale) * 1e-8)
+    zero_point_offset = torch.round(val_min / scale)
+
+    # Quantize
+    quantized_vals = torch.round((input_float32 - val_min) / scale)
+    # Clamp to [0, 3] range first
+    quantized_vals = torch.clamp(quantized_vals, min=0, max=3)
+    # Shift to represent [-2, 1] if needed, but let's keep it [0, 3] for simplicity of dequant
+    # Store as int8 as there's no int4 type
+    dequantized_vals = quantized_vals * scale + val_min
+    return dequantized_vals.to(dtype) # Return in original dtype

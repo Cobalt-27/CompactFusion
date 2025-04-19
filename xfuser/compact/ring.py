@@ -31,8 +31,7 @@ except ImportError:
     flash_attn = None
     _flash_attn_forward = None
     from yunchang.kernels.attention import pytorch_attn_forward
-    
-from xfuser.compact.slowpath import set_current_lowrank_scale
+
 
 def compact_fwd(
     q: torch.Tensor,
@@ -69,52 +68,7 @@ def compact_fwd(
             q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_attn_probs,
             deterministic, attn_layer, group, joint_tensor_key, joint_tensor_value, joint_strategy, mod_idx, current_iter
         )
-AWL = True # attn aware lowrank
-AWL_RANDOM_PERM = True # testing random scaling
-
-def compact_update_awl_scale(q, k):
-    # (bs, seq_len, head_cnt, head_size)
-    """
-    Calculates key token importance by sampling queries and computing attention scores.
-
-    Args:
-        q: Query tensor (bs, seq_len, head_cnt, head_size)
-        k: Key tensor (bs, seq_len, head_cnt, head_size)
-    """
-    with torch.no_grad(): # No need to track gradients for importance calculation
-        bs, seq_len, head_cnt, head_size = q.shape
-        # 1. Sample Queries (e.g., 10%)
-        sample_ratio = 0.05
-        sample_size = max(1, int(seq_len * sample_ratio)) # Ensure at least one sample
-        # Use torch.randperm for efficient random sampling without replacement
-        sampled_indices = torch.randperm(seq_len, device=q.device)[:sample_size]
-        sampled_q = q[:, sampled_indices, :, :] # Shape: (bs, sample_size, head_cnt, head_size)
-        # 2. Compute Attention Scores (Q * K^T)
-        # Permute Q: (bs, head_cnt, sample_size, head_size)
-        sampled_q_permuted = sampled_q.permute(0, 2, 1, 3)
-        # Permute K^T: (bs, head_cnt, head_size, seq_len)
-        k_permuted_transposed = k.permute(0, 2, 3, 1) 
-        # Calculate scores: (bs, head_cnt, sample_size, seq_len)
-        # Using float32 for stability in score calculation
-        attn_scores = torch.matmul(sampled_q_permuted.float(), k_permuted_transposed.float())
-        # 3. Aggregate Scores
-        # Sum across heads: (bs, sample_size, seq_len)
-        scores_summed_heads = attn_scores.sum(dim=1)
-        # Sum across sampled queries: (bs, seq_len) -> Importance per key token per batch item
-        key_token_importance = scores_summed_heads.sum(dim=1).flatten()
-        # Normalize scores (optional, depends on how importance is used)
         
-        assert key_token_importance.shape == (bs * seq_len,), f"{key_token_importance.shape} != {(bs * seq_len,)}, bs: {bs}, seq_len: {seq_len}"
-        top_k = int(bs * seq_len * 0.1)
-        threshold = torch.topk(key_token_importance, top_k, largest=True).values[-1]
-        # Create a new tensor with scale values (10 for top 10%, 1 for others)
-        token_scale = torch.ones_like(key_token_importance)
-        token_scale[key_token_importance >= threshold] = 10.0
-        # lets perform a random perm here to test a random scale
-        if AWL_RANDOM_PERM:
-            token_scale = token_scale[torch.randperm(bs * seq_len)]
-        set_current_lowrank_scale(token_scale)
-
 @Profiler.prof_func("compact._compact_ring_fwd")
 def _compact_ring_fwd(
     q: torch.Tensor,
@@ -172,8 +126,7 @@ def _compact_ring_fwd(
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    if AWL: 
-        compact_update_awl_scale(q, k)
+
     out = None
     lse = None
 
@@ -276,29 +229,6 @@ def _compact_ring_fwd(
             k_to_send = buf_k 
             v_to_send = buf_v
             prev_compress_type = compress_type
-    
-    
-    # if AWL:
-    #     token_importance = lse.squeeze(dim=-1) # -> nhead, seq_len
-    #     assert token_importance.shape == (q.shape[0], q.shape[1], k.shape[2]), f"{token_importance.shape} != {(q.shape[0], q.shape[1], k.shape[2])}, q.shape: {q.shape}, k.shape: {k.shape}"
-    #     # token_importance = torch.exp(token_importance)
-    #     token_importance = torch.sum(token_importance.float(), dim=(0,2)).flatten()
-    #     # Set top 10% tokens to a scale of 10, others to a scale of 1
-    #     num_tokens = token_importance.size(0)
-    #     top_k = int(num_tokens * 0.05)  # Calculate how many tokens are in the top 10%
-    #     # Find the threshold value for the top 10%
-    #     threshold = torch.topk(token_importance, top_k, largest=True).values[-1]
-    #     # Create a new tensor with scale values (10 for top 10%, 1 for others)
-    #     token_scale = torch.ones_like(token_importance)
-    #     token_scale[token_importance >= threshold] = 20.0
-    #     # Replace token_importance with the scaled version
-    #     token_importance = token_scale
-    #     # print(f'token_importance 1%: {token_importance.quantile(0.01):.4f}, 99%: {token_importance.quantile(0.99):.4f}')
-    #     # # token_importance = token_importance.pow(2)
-    #     # token_importance = torch.softmax(token_importance, dim=-1)
-    #     # print(f"token_importance 1%: {token_importance.quantile(0.01):.4f}, 99%: {token_importance.quantile(0.99):.4f}")
-    #     assert token_importance.shape == (q.shape[1],), f"{token_importance.shape} != {(q.shape[1],)}, q.shape: {q.shape}"
-    #     set_current_lowrank_scale(token_importance)
     
     out = out.to(q.dtype)
     lse = lse.squeeze(dim=-1).transpose(1, 2)

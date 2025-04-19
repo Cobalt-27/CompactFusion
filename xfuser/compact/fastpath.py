@@ -161,16 +161,20 @@ def binary_quant_fastpath(
 
     if rank == -1:
         # Calculate channel-wise mean scale
-        with Profiler.scope("compact.quant.scale_channel_mean"):
+        with Profiler.scope("compact.quant.calc_scale_mean"):
             # Scale is the mean of absolute values per channel -> (C,)
             mean_scale_c = torch.mean(tensor_to_quantize_abs_nc, dim=0)
-        # Prepare rank-1 structure for the kernel: U(N, 1) = ones, V(C, 1) = mean_scale.T
-        scale_u_output_nk = torch.ones((N_ROWS, 1), device=x_tensor_nc.device, dtype=torch.half) # Shape (N, 1)
-        scale_v_output_ck = mean_scale_c.unsqueeze(1).contiguous().to(torch.half) # Shape (C, 1)
+            # Prepare rank-1 structure for the kernel: U(N, 1) = ones, V(C, 1) = mean_scale.T
+            # scale_u_output_nk = torch.ones((N_ROWS, 1), device=x_tensor_nc.device, dtype=torch.half) # Shape (N, 1)
+            
+            scale_u_output_nk = torch.mean(tensor_to_quantize_abs_nc, dim=1, keepdim=True) # Shape (N, 1)
+            scale_u_output_nk = scale_u_output_nk / scale_u_output_nk.mean(dim=0, keepdim=True)
+            scale_v_output_ck = mean_scale_c.unsqueeze(1).contiguous().to(torch.half) # Shape (C, 1)
         effective_rank = 1 # Kernel needs rank >= 1 for its loop
     else: # rank >= 1
         # Calculate rank-K approximation for scale based on abs(tensor_to_quantize)
         # subspace_iter(N, C) returns U(N, K), V_t(K, C)
+        assert rank > 0, "Rank must be > 1 for rank-K approximation"
         with Profiler.scope(f"compact.quant.scale_rank{rank}_approx"):
             scale_U_nk, scale_V_t_kc, _ = subspace_iter(
                 tensor_to_quantize_abs_nc, rank=rank, num_iters=2
