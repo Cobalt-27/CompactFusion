@@ -351,18 +351,21 @@ def sim_int2(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Te
         Simulated dequantized tensor with same shape and dtype
     """
     assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
-    assert input_tensor.dtype == torch.half, f"Input tensor must be torch.half, but got {input_tensor.dtype}."
+    # assert input_tensor.dtype == torch.half, f"Input tensor must be torch.half, but got {input_tensor.dtype}."
     input_dtype = input_tensor.dtype
 
     reduce_dims = 0
     input_float32 = input_tensor.float()
+    abs_input = torch.abs(input_float32)
 
-    scale = torch.mean(torch.abs(input_float32), dim=reduce_dims, keepdim=True) if scale is None else scale
-
-    level_pp = 2.0 * scale
+    chan_scale = torch.mean(abs_input, dim=reduce_dims, keepdim=True) if scale is None else scale
+    tok_scale = torch.mean(abs_input, dim=1, keepdim=True)
+    tok_scale = tok_scale / tok_scale.mean()
+    scale = chan_scale * tok_scale
+    level_pp = 1.5 * scale
     level_p  = 0.5 * scale
     level_n  = -0.5 * scale
-    level_nn = -2.0 * scale
+    level_nn = -1.5 * scale
 
     output = torch.zeros_like(input_float32)
 
