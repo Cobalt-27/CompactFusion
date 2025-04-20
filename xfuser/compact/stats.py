@@ -440,9 +440,9 @@ class StatsLogger:
                 avg_total_error = np.mean(avg_total_error_list) if avg_total_error_list else None
                 avg_act_norm = np.mean([s['activation_norm'] for s in stats])
 
-                # Print first line with error and activation norm
-                print(f"err: {avg_error:.3f}" + (f", total_err: {avg_total_error:.3f}" if avg_total_error is not None else ""), end="")
-                print(f", act={avg_act_norm:.3f}", end="")
+                avg_rel_error = avg_error / avg_act_norm if avg_act_norm > 1e-8 else float('inf')
+                print(f"err: {avg_error:.3f}, rel_err: {avg_rel_error:.1%}" + (f", total_err: {avg_total_error:.3f}" if avg_total_error is not None else ""), end="")
+                print(f", act: {avg_act_norm:.3f}", end="")
 
                 if res >= 1:
                     avg_delta_norm = np.mean([s['delta_norm'] for s in stats if s['delta_norm'] is not None])
@@ -549,7 +549,8 @@ class StatsLogger:
                     total_err_values.append(s['total_error'])
         mean_total_err = np.mean(total_err_values) if total_err_values else None
 
-        print(f"🟧 avg comp error: {mean_err:.3f}" + (f", avg total err: {mean_total_err:.3f}" if mean_total_err is not None else ", [total err not logged]"))
+        mean_rel_err = mean_err / mean_act if mean_act > 1e-8 else float('inf')
+        print(f"🟧 avg comp error: {mean_err:.3f}, avg rel err: {mean_rel_err:.1%}" + (f", avg total err: {mean_total_err:.3f}" if mean_total_err is not None else ", [total err not logged]"))
         from xfuser.compact.utils import get_emoji
         print(get_emoji())
 

@@ -130,15 +130,16 @@ def _compact_ring_fwd(
     out = None
     lse = None
 
-    compress_type = compact_config().compress_func(mod_idx, current_iter)
+    compress_type_k = compact_config().compress_func(mod_idx, current_iter, 'k')
+    compress_type_v = compact_config().compress_func(mod_idx, current_iter, 'v')
     assert compact_config().error_feedback, "error feedback must be enabled"
     
     k_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-k"
     v_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-v"
     original_k_shape = k.shape 
     original_v_shape = v.shape
-    k_to_send = compact_compress(k_my_cache_key, k, compress_type, update_cache=True)
-    v_to_send = compact_compress(v_my_cache_key, v, compress_type, update_cache=True)
+    k_to_send = compact_compress(k_my_cache_key, k, compress_type_k, update_cache=True)
+    v_to_send = compact_compress(v_my_cache_key, v, compress_type_v, update_cache=True)
     
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
@@ -151,10 +152,10 @@ def _compact_ring_fwd(
             k_recv_cache_key = f"{mod_idx}-{recv_rank}-k"
             v_recv_cache_key = f"{mod_idx}-{recv_rank}-v"
             k = compact_decompress(
-                k_recv_cache_key, k_to_send, compress_type, original_k_shape, update_cache=True
+                k_recv_cache_key, k_to_send, compress_type_k, original_k_shape, update_cache=True
             )
             v = compact_decompress(
-                v_recv_cache_key, v_to_send, compress_type, original_v_shape, update_cache=True
+                v_recv_cache_key, v_to_send, compress_type_v, original_v_shape, update_cache=True
             )
         k = k.contiguous() 
         v = v.contiguous()

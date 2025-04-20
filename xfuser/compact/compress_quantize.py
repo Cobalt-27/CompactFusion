@@ -362,10 +362,11 @@ def sim_int2(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Te
     tok_scale = torch.mean(abs_input, dim=1, keepdim=True)
     tok_scale = tok_scale / tok_scale.mean()
     scale = chan_scale * tok_scale
-    level_pp = 1.5 * scale
+    # 2 seems to be better than 1.5
+    level_pp = 2 * scale
     level_p  = 0.5 * scale
     level_n  = -0.5 * scale
-    level_nn = -1.5 * scale
+    level_nn = -2 * scale
 
     output = torch.zeros_like(input_float32)
 
