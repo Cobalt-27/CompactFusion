@@ -139,7 +139,15 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
         return sim_binary(x, rank=-1)
     else:
         raise ValueError(f"Invalid compress_type value: {compress_type}")
-    
+
+_current_lowrank_scale_k = None #size (C,) or (N,)
+_current_lowrank_scale_v = None #size (C,) or (N,)
+
+def set_current_lowrank_scale(scale_k, scale_v):
+    global _current_lowrank_scale_k, _current_lowrank_scale_v
+    _current_lowrank_scale_k = scale_k
+    _current_lowrank_scale_v = scale_v
+
 def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_ratio: int = None, rank: int = None):
     """
     Simulate the compression and decompression of a tensor using the specified method.
@@ -160,7 +168,39 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         return sim_int2(x)
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None
-        u, v, _ = subspace_iter(x, rank, 2) # Use provided rank
+        from xfuser.compact.main import compact_get_current_cache_key
+        N, C = x.shape
+        cache_key = compact_get_current_cache_key()
+        is_k = cache_key.split("-")[-1] == 'k'
+        current_lowrank_scale = _current_lowrank_scale_k if is_k else _current_lowrank_scale_v
+        
+        if current_lowrank_scale is not None:
+            if current_lowrank_scale.shape == (C,):
+                x = x.float() * current_lowrank_scale.view(1, C)
+            elif current_lowrank_scale.shape == (N,):
+                x = x.float() * current_lowrank_scale.view(N, 1)
+        u, v, _ = subspace_iter(x, rank, 2)
+        if current_lowrank_scale is not None:
+            if current_lowrank_scale.shape == (C,):
+                v = v / current_lowrank_scale.view(1, C)
+            elif current_lowrank_scale.shape == (N,):
+                u = u / current_lowrank_scale.view(N, 1)
+        # from xfuser.compact.compress_quantize import sim_int4
+        # import math
+        # from fast_hadamard_transform import hadamard_transform
+        # N = u.shape[1]
+        # def next_power_of_two(n: int):
+        #     return 1 << (n - 1).bit_length()
+        # N = next_power_of_two(N)
+        # scale = 1 / math.sqrt(N)
+        # u_h = hadamard_transform(u, scale=scale)
+        # v_h = hadamard_transform(v.t(), scale=scale).t()
+        # assert u_h.shape == u.shape
+        # assert v_h.shape == v.shape
+        # u = u_h
+        # v = v_h
+        # u = sim_int2(u_h)
+        # v = sim_int2(v_h.t()).t()
         return torch.matmul(u, v)
     else:
         raise ValueError("Invalid compress_type value")

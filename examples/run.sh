@@ -1,7 +1,7 @@
 set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
-export COMPACT_TEST_ENABLE=True
+# export COMPACT_TEST_ENABLE=True
 export COMPACT_TEST_MODEL="Flux"
 export COMPACT_TEST_METHOD="binary"
 export COMPACT_TEST_LOOP=1
@@ -37,9 +37,9 @@ TASK_ARGS="--height $IMG_SIZE --width $IMG_SIZE --no_use_resolution_binning"
 # CACHE_ARGS="--use_fbcache"
 
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=1,2
 N_GPUS=2
-PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 2 --pipefusion_parallel_degree 1" #--pipefusion_parallel_degree 1
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 2 --pipefusion_parallel_degree 1 --enable_slicing" #--pipefusion_parallel_degree 1
 
 # CFG_ARGS="--use_cfg_parallel"
 
@@ -69,7 +69,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k" \
+--prompt "A man in glasses eating a donut out of a cup." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
@@ -78,3 +78,6 @@ $CACHE_ARGS \
 # 3 dogs wearing coats
 # Astronaut in a jungle, cold color palette, muted colors, detailed, 8k
 # brown dog laying on the ground with a metal bowl in front of him.
+# A child holding a flowered umbrella and petting a yak.
+# A street scene at an intersection with tall skyscrapers in the background. 
+# A man in glasses eating a donut out of a cup.
