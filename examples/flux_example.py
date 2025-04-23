@@ -37,36 +37,9 @@ def main():
     """
     COMPACT
     """
-    from xfuser.compact.patchpara.df_utils import PatchConfig
-    prepared_patch_config = PatchConfig(
-        use_compact=False,
-        async_comm=True,
-        async_warmup=2,
-    )
-    OVERRIDE_WITH_PATCH_PARA = False
-    patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
-    from xfuser.prof import Profiler, prof_summary, set_torch_profiler
-    from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
-    compact_config = CompactConfig(
-        enabled=True,
-        override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
-        patch_gather_fwd_config=patch_config,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
-        sparse_ratio=8,
-        comp_rank=2,
-        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
-        ef=True,
-        simulate=False,
-        log_stats=False,
-        check_consist=False,
-        fastpath=True,
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
-        delta_decay_factor=0.5
-    )
+    from xfuser.compact.main import compact_init, compact_reset, compact_hello
+    from examples.configs import get_config
+    compact_config = get_config("flux", "lowrank")
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -105,32 +78,27 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
-        Profiler.instance().reset()
-        with Profiler.instance().scope("total"):
-            # Profiler.instance().disable()
-            output = pipe(
-                height=input_config.height,
-                width=input_config.width,
-                prompt=input_config.prompt,
-                num_inference_steps=input_config.num_inference_steps,
-                output_type=input_config.output_type,
-                max_sequence_length=256,
-                guidance_scale=0.0,
-                generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-            )
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
-            # Profiler.instance().enable()
+        output = pipe(
+            height=input_config.height,
+            width=input_config.width,
+            prompt=input_config.prompt,
+            num_inference_steps=input_config.num_inference_steps,
+            output_type=input_config.output_type,
+            max_sequence_length=256,
+            guidance_scale=0.0,
+            generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+        )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+        # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
         if local_rank == 0:
             stats_verbose()
-            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            print(str.join("\n", prof_result))
-            plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # save_eigenvalues(save_dir="./results/eigenvalues")
             
     parallel_info = (

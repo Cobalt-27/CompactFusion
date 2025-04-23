@@ -33,26 +33,9 @@ def main():
     """
     COMPACT
     """
-    from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
-    from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
-    compact_config = CompactConfig(
-        enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_METHOD if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
-        sparse_ratio=8,
-        comp_rank=2,
-        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
-        ef=True, 
-        simulate=False,
-        log_stats=False,
-        check_consist=False,
-        fastpath=True ,
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
-        cache_low_rank_dim=None,
-        delta_decay_factor=0.3
-    )
+    from xfuser.compact.main import compact_init, compact_reset, compact_hello
+    from examples.configs import get_config
+    compact_config = get_config("flux", "lowrank")
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -102,6 +85,8 @@ def main():
             generator=torch.Generator(device='cuda').manual_seed(input_config.seed),
         )
         end_time = time.time()
+        if local_rank == 3:
+            print(f"The time used for {j} to {j+num_prompt_one_step}: {end_time - start_time} seconds")
         total_time.append(end_time - start_time)
         if input_config.output_type == 'pil':
             if pipe.is_dp_last_group():
@@ -109,7 +94,7 @@ def main():
                     output.images[k].save(f'{folder_path}/{j+k:05d}.png')
         flush()
         
-    if get_world_group().rank == 0:
+    if get_world_group().rank == get_world_group().world_size - 1:
         print(f'Average time: {sum(total_time) / len(total_time)} seconds')
     get_runtime_state().destory_distributed_env()
 

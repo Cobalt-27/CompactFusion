@@ -21,6 +21,8 @@ def get_config(model_name: str, method: str):
             config = _flux_patch_config()
         elif method == "ulysses":
             config = _disabled_config()
+        elif method == "lowrank":
+            config = _flux_lowrank_config()
     elif model_name == "pixart":
         if method == "binary":
             config = _pixart_binary_config()
@@ -186,6 +188,18 @@ def _pixart_patch_config():
         override_with_patch_gather_fwd=True,
         patch_gather_fwd_config=patch_config,
         compress_func=None,
+        simulate=False,
+        log_stats=False,
+        fastpath=False,
+    )
+
+def _flux_lowrank_config():
+    return CompactConfig(
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=8,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
         simulate=False,
         log_stats=False,
         fastpath=False,
