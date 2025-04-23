@@ -57,8 +57,9 @@ class xFuserLongContextAttention(LongContextAttention):
         COMPACT ATTN
         """
         from xfuser.compact.main import compact_config
+        from xfuser.compact.ring import compact_fwd
         if compact_config().enabled:
-            self.ring_attn_fn = None
+            self.ring_attn_fn = compact_fwd
         else:
             self.ring_attn_fn = xdit_ring_flash_attn_func
         self.idx = None # NOTE: assign idx in forward
@@ -144,29 +145,30 @@ class xFuserLongContextAttention(LongContextAttention):
                 * (ulysses_rank + 1),
                 :,
             ]
-
+        from xfuser.prof import Profiler
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
-        if self.use_pack_qkv:
-            # (3*bs, seq_len/N, head_cnt, head_size)
-            qkv = torch.cat([query, key, value]).continous()
-            # (3*bs, seq_len, head_cnt/N, head_size)
-            qkv = SeqAllToAll4D.apply(
-                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
-            )
-            qkv = torch.chunk(qkv, 3, dim=0)
-            query_layer, key_layer, value_layer = qkv
+        with Profiler.instance().scope("ulysses.all2all"):
+            if self.use_pack_qkv:
+                # (3*bs, seq_len/N, head_cnt, head_size)
+                qkv = torch.cat([query, key, value]).continous()
+                # (3*bs, seq_len, head_cnt/N, head_size)
+                qkv = SeqAllToAll4D.apply(
+                    self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
+                )
+                qkv = torch.chunk(qkv, 3, dim=0)
+                query_layer, key_layer, value_layer = qkv
 
-        else:
-            query_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-            )
-            key_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
-            )
-            value_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
-            )
+            else:
+                query_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, query, self.scatter_idx, self.gather_idx
+                )
+                key_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, key, self.scatter_idx, self.gather_idx
+                )
+                value_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, value, self.scatter_idx, self.gather_idx
+                )
 
         """
         APPLY COMPACT ATTN
@@ -175,11 +177,19 @@ class xFuserLongContextAttention(LongContextAttention):
             global ATTN_LAYER_IDX
             self.idx = ATTN_LAYER_IDX
             ATTN_LAYER_IDX += 1
+        
+        """
+        Collector for Q, K, V, Layer/Step Specific
+        """
         from xfuser.compact.main import compact_config, compact_get_step
-        from xfuser.compact.ring import compact_fwd
+        from xfuser.collector.collector import collect
+        collect(query_layer, "q", compact_get_step(), self.idx)
+        collect(key_layer, "k", compact_get_step(), self.idx)
+        collect(value_layer, "v", compact_get_step(), self.idx)
+        
         if compact_config().enabled:
             # assert not self.use_kv_cache
-            out = compact_fwd(
+            out = self.ring_attn_fn(
                 query_layer,
                 key_layer,
                 value_layer,
@@ -196,7 +206,7 @@ class xFuserLongContextAttention(LongContextAttention):
                 joint_tensor_value=joint_tensor_value,
                 joint_strategy=joint_strategy,
                 mod_idx=self.idx,
-                current_iter=compact_get_step(),
+                current_iter=compact_get_step()
             )
         else:
             out = self.ring_attn_fn(
@@ -224,9 +234,10 @@ class xFuserLongContextAttention(LongContextAttention):
 
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        output = SeqAllToAll4D.apply(
-            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
-        )
+        with Profiler.instance().scope("ulysses.all2all"):
+            output = SeqAllToAll4D.apply(
+                self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
+            )
 
         # out e.g., [s/p::h]
         return output

@@ -36,7 +36,7 @@ $TASK_ARGS \
 $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
---warmup_steps 1 \
+--warmup_steps 2 \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

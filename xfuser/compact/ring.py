@@ -32,6 +32,7 @@ except ImportError:
     _flash_attn_forward = None
     from yunchang.kernels.attention import pytorch_attn_forward
 
+
 def compact_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -68,6 +69,53 @@ def compact_fwd(
             deterministic, attn_layer, group, joint_tensor_key, joint_tensor_value, joint_strategy, mod_idx, current_iter
         )
 
+# env var USE_AWL
+import os
+AWL=os.getenv("USE_AWL", "0") == "1"
+AWL_RAND=False
+
+def compact_update_awl_scale(q, k, v):
+    # (bs, seq_len, head_cnt, head_size)
+    """
+    Calculates key token importance by sampling queries and computing attention scores.
+
+    Args:
+        q: Query tensor (bs, seq_len, head_cnt, head_size)
+        k: Key tensor (bs, seq_len, head_cnt, head_size)
+    """
+    from xfuser.compact.slowpath import set_current_lowrank_scale
+    if not AWL:
+        return
+    with torch.no_grad(): # No need to track gradients for importance calculation
+        if not AWL_RAND:
+            bs, seq_len, head_cnt, head_size = q.shape
+            # q_2d = q.view(bs * seq_len, head_cnt * head_size)
+            # q_chan_mean = torch.mean(q_2d.abs(), dim=0).flatten().float()
+            # q_chan_mean = q_chan_mean / q_chan_mean.norm()
+            # lowrank_scale_k = q_chan_mean
+            # print percentile
+            # print(f"q_chan_mean 1%: {q_chan_mean.quantile(0.01):.4f}, 99%: {q_chan_mean.quantile(0.99):.4f}")
+            v_2d = v.view(bs * seq_len, head_cnt * head_size)
+            v_norm = torch.norm(v_2d, dim=-1).flatten()
+            # smaller the v norm, typically larger the attn score
+            lowrank_scale_k = v_norm.mean() / v_norm
+            lowrank_scale_k = lowrank_scale_k.flatten()
+            set_current_lowrank_scale(lowrank_scale_k, None)
+            return
+        else:
+            bs, seq_len, head_cnt, head_size = q.shape
+            random_scale = torch.ones(bs * seq_len)
+            # Randomly select 10% of the elements and set them to 10
+            mask = torch.zeros(bs * seq_len, device=q.device, dtype=torch.bool)
+            num_elements = bs * seq_len
+            num_to_select = int(0.1 * num_elements)  # 10% of elements
+            # Get random indices
+            indices = torch.randperm(num_elements, device=q.device)[:num_to_select]
+            mask.scatter_(0, indices, True)
+            # Create a tensor with 10s where mask is True, and original values elsewhere
+            random_scale = torch.where(mask, torch.tensor(10.0, device=q.device), torch.ones_like(mask, device=q.device, dtype=torch.float32))
+            set_current_lowrank_scale(random_scale, random_scale)
+
 @Profiler.prof_func("compact._compact_ring_fwd")
 def _compact_ring_fwd(
     q: torch.Tensor,
@@ -88,6 +136,7 @@ def _compact_ring_fwd(
     mod_idx=None,
     current_iter=None,
 ):
+    # (bs, seq_len, head_cnt, head_size)
     assert alibi_slopes is None
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -128,24 +177,16 @@ def _compact_ring_fwd(
     out = None
     lse = None
 
-    compress_type = compact_config().compress_func(mod_idx, current_iter)
+    compress_type_k = compact_config().compress_func(mod_idx, current_iter, 'k')
+    compress_type_v = compact_config().compress_func(mod_idx, current_iter, 'v')
     assert compact_config().error_feedback, "error feedback must be enabled"
     
     k_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-k"
     v_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-v"
     original_k_shape = k.shape 
     original_v_shape = v.shape
-    k_compress_rank = compact_config().comp_rank
-    v_compress_rank = compact_config().comp_rank
-    if compress_type == COMPACT_COMPRESS_TYPE.BINARY:
-        # low rank as scale is expensive, we use lowrank with stride=2 for v
-        k_compress_rank = -1 # k is not low-rank, so we use mean as scale
-        if current_iter % 2 == 0:
-            v_compress_rank = -1
-        else:
-            v_compress_rank = compact_config().comp_rank
-    k_to_send = compact_compress(k_my_cache_key, k, compress_type, update_cache=True, override_rank=k_compress_rank)
-    v_to_send = compact_compress(v_my_cache_key, v, compress_type, update_cache=True, override_rank=v_compress_rank)
+    k_to_send = compact_compress(k_my_cache_key, k, compress_type_k, update_cache=True)
+    v_to_send = compact_compress(v_my_cache_key, v, compress_type_v, update_cache=True)
     
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
@@ -158,10 +199,10 @@ def _compact_ring_fwd(
             k_recv_cache_key = f"{mod_idx}-{recv_rank}-k"
             v_recv_cache_key = f"{mod_idx}-{recv_rank}-v"
             k = compact_decompress(
-                k_recv_cache_key, k_to_send, prev_compress_type, original_k_shape, update_cache=True, override_rank=k_compress_rank
+                k_recv_cache_key, k_to_send, compress_type_k, original_k_shape, update_cache=True
             )
             v = compact_decompress(
-                v_recv_cache_key, v_to_send, prev_compress_type, original_v_shape, update_cache=True, override_rank=v_compress_rank
+                v_recv_cache_key, v_to_send, compress_type_v, original_v_shape, update_cache=True
             )
         k = k.contiguous() 
         v = v.contiguous()
@@ -180,7 +221,7 @@ def _compact_ring_fwd(
                 key_to_use, value_to_use = k, v
         else:
             key_to_use, value_to_use = k, v
-
+        # (bs, seq_len, head_cnt, head_size)
         if not causal or step <= comm.rank:
             if flash_attn is None:
                 block_out, block_lse = pytorch_attn_forward(
@@ -206,7 +247,7 @@ def _compact_ring_fwd(
                         return_softmax=True and dropout_p > 0,
                     )
                 else:
-                     block_out, block_lse, _, _ = _flash_attn_forward(
+                    block_out, block_lse, _, _ = _flash_attn_forward(
                         q,
                         key_to_use,
                         value_to_use,
@@ -226,7 +267,7 @@ def _compact_ring_fwd(
                 comm.wait()
             k_to_send = buf_k 
             v_to_send = buf_v
-            prev_compress_type = compress_type
+    
     out = out.to(q.dtype)
     lse = lse.squeeze(dim=-1).transpose(1, 2)
     if compact_config().check_cache_consistency:

@@ -13,25 +13,16 @@ from xfuser.core.distributed import (
     get_data_parallel_rank,
 )
 
+# COMPACT
+from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
+from xfuser.prof import Profiler, prof_summary, set_torch_profiler
+from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
+from examples.test_utils import TEST_ENABLE, TEST_MODEL, TEST_METHOD, TEST_LOOP, test_hello
+from examples.configs import get_config
+from xfuser.compact.patchpara.df_utils import PatchConfig
 
-def main():
-    parser = FlexibleArgumentParser(description="xFuser Arguments")
-    args = xFuserArgs.add_cli_args(parser).parse_args()
-    engine_args = xFuserArgs.from_cli_args(args)
-    engine_config, input_config = engine_args.create_config()
-    local_rank = get_world_group().local_rank
-    text_encoder = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder", torch_dtype=torch.float16)
-    if args.use_fp8_t5_encoder:
-        from optimum.quanto import freeze, qfloat8, quantize
-        print(f"rank {local_rank} quantizing text encoder")
-        quantize(text_encoder, weights=qfloat8)
-        freeze(text_encoder)
-
-    """
-    COMPACT
-    """
-    
-    from xfuser.compact.patchpara.df_utils import PatchConfig
+def customized_compact_config():
+    assert not TEST_ENABLE
     prepared_patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
@@ -39,10 +30,6 @@ def main():
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    
-    from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
-    from xfuser.prof import Profiler, prof_summary, set_torch_profiler
-    from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
         enabled=False,
@@ -64,6 +51,29 @@ def main():
         quantized_cache=False,
         cache_low_rank_dim=None
     )
+    return compact_config
+
+def main():
+    parser = FlexibleArgumentParser(description="xFuser Arguments")
+    args = xFuserArgs.add_cli_args(parser).parse_args()
+    engine_args = xFuserArgs.from_cli_args(args)
+    engine_config, input_config = engine_args.create_config()
+    local_rank = get_world_group().local_rank
+    text_encoder = T5EncoderModel.from_pretrained(engine_config.model_config.model, subfolder="text_encoder", torch_dtype=torch.float16)
+    if args.use_fp8_t5_encoder:
+        from optimum.quanto import freeze, qfloat8, quantize
+        print(f"rank {local_rank} quantizing text encoder")
+        quantize(text_encoder, weights=qfloat8)
+        freeze(text_encoder)
+
+    """
+    COMPACT
+    """
+
+    if TEST_ENABLE:
+        compact_config = get_config(TEST_MODEL, TEST_METHOD)
+    else:
+        compact_config = customized_compact_config()
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -82,7 +92,12 @@ def main():
     pipe.vae.enable_tiling()
     
     compact_hello()
-    LOOP_COUNT = 1
+    if local_rank == 0:
+        test_hello()
+    if TEST_ENABLE:
+        LOOP_COUNT = TEST_LOOP
+    else:
+        LOOP_COUNT = 1
 
     for _ in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
@@ -105,6 +120,7 @@ def main():
         elapsed_time = end_time - start_time
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps
+        Profiler.instance().sync()
         if local_rank == 0:
             stats_verbose()
             # stats_verbose_steps(keys=["8-0-k"])
@@ -116,6 +132,10 @@ def main():
         f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}_tc_{engine_args.use_torch_compile}"
     )
+    
+    test_info = f"_test_{TEST_MODEL}_{TEST_METHOD}" if TEST_ENABLE else ""
+    parallel_info += f"{test_info}"
+    
     if input_config.output_type == "pil":
         dp_group_index = get_data_parallel_rank()
         num_dp_groups = get_data_parallel_world_size()

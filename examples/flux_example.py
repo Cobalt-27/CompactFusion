@@ -18,6 +18,50 @@ from xfuser.core.distributed import (
 )
 from xfuser.model_executor.cache.diffusers_adapters import apply_cache_on_transformer
 
+import os
+
+
+from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
+from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
+from xfuser.compact.patchpara.df_utils import PatchConfig
+from xfuser.prof import Profiler, prof_summary
+import diffusers.utils.logging
+from examples.test_utils import TEST_ENABLE, TEST_MODEL, TEST_METHOD, TEST_LOOP, test_hello
+
+def customized_compact_config():
+    """
+    COMPACT
+    """
+    assert not TEST_ENABLE
+    prepared_patch_config = PatchConfig(
+        use_compact=False,
+        async_comm=True,
+        async_warmup=2,
+    )
+    OVERRIDE_WITH_PATCH_PARA = False
+    patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK
+    compact_config = CompactConfig(
+        enabled=True,
+        override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
+        patch_gather_fwd_config=patch_config,
+        compress_func=lambda layer_idx, step, tag: (COMPACT_METHOD if tag == 'k' else COMPACT_COMPRESS_TYPE.IDENTITY) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        sparse_ratio=8,
+        comp_rank=16 if not COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY else -1,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=True or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
+        log_stats=True,
+        check_consist=False,
+        fastpath=False and COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY,
+        ref_activation_path='ref_activations',
+        dump_activations=False,
+        calc_total_error=False,
+        delta_decay_factor=0.5
+    )
+    return compact_config
+
+
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
@@ -33,7 +77,7 @@ def main():
         logging.info(f"rank {local_rank} quantizing text encoder 2")
         quantize(text_encoder_2, weights=qfloat8)
         freeze(text_encoder_2)
-        
+    
     """
     COMPACT
     """
@@ -66,15 +110,32 @@ def main():
         logging.info(f"rank {local_rank} sequential CPU offload enabled")
     else:
         pipe = pipe.to(f"cuda:{local_rank}")
+        
+        
+    from xfuser.collector.collector import Collector, init
+    collector = Collector(
+        save_dir="./results/collector", 
+        target_steps=None,
+        target_layers=None,
+        enabled=False,
+        rank=local_rank
+    )
+    init(collector)
 
     parameter_peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
-    pipe.prepare_run(input_config, steps=input_config.num_inference_steps)
-    
+    pipe.prepare_run(input_config, steps=5)
+    if local_rank == 0:
+        print(f"prepare run finished")
+    if local_rank == 0:
+        test_hello()
     compact_hello()
-    LOOP_COUNT = 4
+    if TEST_ENABLE:
+        LOOP_COUNT = TEST_LOOP
+    else:
+        LOOP_COUNT = 1
 
-    for _ in range(LOOP_COUNT):
+    for i in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
@@ -94,11 +155,14 @@ def main():
         # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
+        Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
         if local_rank == 0:
             stats_verbose()
-            # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            print(str.join("\n", prof_result))
+            plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # save_eigenvalues(save_dir="./results/eigenvalues")
             
     parallel_info = (
@@ -107,6 +171,9 @@ def main():
         f"tp{engine_args.tensor_parallel_degree}_"
         f"pp{engine_args.pipefusion_parallel_degree}_patch{engine_args.num_pipeline_patch}"
     )
+    test_info = f"_test_{TEST_MODEL}_{TEST_METHOD}" if TEST_ENABLE else ""
+    parallel_info += f"{test_info}"
+    
     if input_config.output_type == "pil":
         dp_group_index = get_data_parallel_rank()
         num_dp_groups = get_data_parallel_world_size()

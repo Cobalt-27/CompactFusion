@@ -3,6 +3,9 @@ import torch.distributed as dist
 from xfuser.prof import Profiler
 from enum import Enum
 from xfuser.compact.patchpara.df_utils import PatchConfig
+import os
+
+ALLOW_DEPRECATED = os.environ.get("COMPACT_ALLOW_DEPRECATED", "0") == "1"
 
 class COMPACT_COMPRESS_TYPE(Enum):
     """
@@ -86,7 +89,7 @@ class CompactConfig:
         
         assert cache_low_rank_dim is None, "deprecated"
         assert self.quantized_cache is False, "deprecated"
-        assert self.compress_residual != 2, "deprecated"
+        # assert self.compress_residual != 2, "deprecated"
         
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
@@ -109,37 +112,32 @@ from xfuser.compact.compress_lowrank import subspace_iter
 
 
 class CompactCache:
-    def __init__(self, quantize=False, low_rank_dim=None):
+    def __init__(self, quantize=False):
         self.quantize = quantize
-        self.low_rank_dim = low_rank_dim
         self.base = {}
         self.delta_base = {}
+        if quantize:
+            assert ALLOW_DEPRECATED
         self.passed_count = 0
-        self.subspace_iters = 2
 
     # @Profiler.prof_func("compact.CompactCache.put")
     def put(self, key, base, delta_base):
         # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-        if key in self.base:
-            self.base[key].copy_(base)
-        else:
-            self.base[key] = base
-
+        # if key in self.base:
+        #     self.base[key] = base
+        # else:
+        self.base[key] = base
+        from xfuser.compact.main import compact_get_step
+        from xfuser.collector.collector import collect
+        if "k" in key:
+            collect(base, "kbase", compact_get_step(), int(key.split("-")[0]))
+        elif "v" in key:
+            collect(base, "vbase", compact_get_step(), int(key.split("-")[0]))
         # Compress or store delta_base
         if delta_base is not None:
-            # Apply low-rank compression only if dim is a valid integer > 0 and < shape
-            if self.low_rank_dim is not None:
-                assert self.low_rank_dim > 0 and self.low_rank_dim < min(delta_base.shape)
-                U, V, _ = subspace_iter(
-                    delta_base,
-                    rank=self.low_rank_dim,
-                    num_iters=self.subspace_iters
-                )
-                self.delta_base[key] = (U, V)
-            else: # Store original tensor directly (if dim is None, 0, or >= shape)
-                self.delta_base[key] = delta_base
+            self.delta_base[key] = delta_base
         else:
             self.delta_base[key] = None
 
@@ -155,14 +153,7 @@ class CompactCache:
     def get_delta_base(self, key):
         # Retrieve stored item for delta_base
         stored_item = self.delta_base.get(key, None)
-
-        if isinstance(stored_item, tuple):
-            # Assumes tuple is (U, V) from compression
-            factor_U, factor_V = stored_item
-            return factor_U @ factor_V
-        else:
-            # Handles Tensor, None, or unexpected types (returns stored_item which would be Tensor or None)
-            return stored_item
+        return stored_item
 
     def check_consistency(self, group=None):
         """

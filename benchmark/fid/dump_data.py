@@ -32,7 +32,7 @@ if __name__ == "__main__":
         if isinstance(image, dict):
             temp = image["bytes"]
             image = Image.open(io.BytesIO(temp))
-        image.save(os.path.join(args.output_root, "images", f"{i:04}.png"))
+        image.save(os.path.join(args.output_root, "images", f"{i:05}.png"))
     
     # for i, image in enumerate(tqdm(dataset["image"])):
     #     image.save(os.path.join(args.output_root, "images", f"{i:04}.png"))

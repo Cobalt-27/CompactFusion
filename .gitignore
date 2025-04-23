@@ -22,3 +22,5 @@ original_images/
 ref_images/
 *.parquet
 *.whl
+activations/
+*.ipynb
