@@ -107,6 +107,7 @@ class Profiler:
         Manually synchronize all recorded events.
         """
         torch.cuda.synchronize()
+        self.get_all_elapsed_times() # flush all events
 
     def reset(self):
         """

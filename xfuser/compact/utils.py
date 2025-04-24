@@ -20,6 +20,7 @@ class COMPACT_COMPRESS_TYPE(Enum):
     SPARSE = "sparse"
     BINARY = "binary"
     INT2 = "int2"
+    INT4 = "int4"
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
     LOW_RANK = "low-rank"
     LOW_RANK_Q = "low-rank-int4"
@@ -96,12 +97,14 @@ class CompactConfig:
         # Add assertion to prevent simultaneous dump and calc
         assert not (self.dump_activations and self.calc_total_error), \
             "Cannot dump activations and calculate total error in the same run. Set one to False."
-
+        if residual == 0:
+            assert not ef, "No residual does not support error feedback."
         if residual == 2:
             assert ef, "2nd order compression requires error feedback enabled."
         if self.fastpath:
             assert ef, "Fastpath requires error feedback enabled."
             assert not simulate, "Fastpath does not support simulation."
+            assert residual == 1, "Fastpath requires 1st order residual."
         
         if self.override_with_patch_gather_fwd:
             assert self.patch_gather_fwd_config is not None, "patch_gather_fwd_config must be set if override_with_patch_gather_fwd is True"

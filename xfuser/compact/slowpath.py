@@ -199,6 +199,8 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         return quant_x.half()
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         return sim_int2(x)
+    elif compress_type == COMPACT_COMPRESS_TYPE.INT4:
+        return sim_int4(x, dim=0)
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None
         u, v, _ = subspace_iter(x, rank, 2)

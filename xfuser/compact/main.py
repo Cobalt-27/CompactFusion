@@ -207,7 +207,7 @@ def compact_compress(
                 )
         else:
             if _config.compress_residual == 0:
-                compressed = _compress_fn(x, compress_type)
+                compressed = _compress_fn(x, compress_type, rank)
                 if _config.log_compress_stats:
                     reconstructed_local = _decompress_fn(compressed, compress_type, x.shape, rank)
                     stats_log().log(
@@ -228,7 +228,7 @@ def compact_compress(
                 compressed = _compress_fn(delta, compress_type, rank)
                 recv_delta = _decompress_fn(compressed, compress_type, x.shape, rank)
                 reconstructed = base + recv_delta
-                cond_cache_put(cache_key, reconstructed, None)
+                cond_cache_put(cache_key, reconstructed if _config.error_feedback else x, None)
                 if _config.log_compress_stats:
                     stats_log().log(
                         cache_key, 
