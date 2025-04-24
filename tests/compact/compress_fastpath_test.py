@@ -22,6 +22,7 @@ RANKS_TO_TEST = [-1, 1, 4] # Test Rank -1, Rank 1, and Rank 4
 @pytest.mark.parametrize("rank", RANKS_TO_TEST)
 def test_binary_fastpath_e2e_vs_sim(shape, seed, update_cache, rank):
     """Compares the end-to-end binary fastpath (quant+dequant) kernel vs simulation for multiple ranks including -1."""
+    torch.set_float32_matmul_precision('high')# solve warning
     torch.manual_seed(seed)
     N, C = shape # Unpack as N, C
     assert C % 8 == 0, "CHANNEL must be divisible by 8"

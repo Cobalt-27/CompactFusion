@@ -22,6 +22,8 @@ class COMPACT_COMPRESS_TYPE(Enum):
     INT2 = "int2"
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
     LOW_RANK = "low-rank"
+    LOW_RANK_Q = "low-rank-int4"
+    LOW_RANK_AWL = "low-rank-awl"
 
 
 class CompactConfig:

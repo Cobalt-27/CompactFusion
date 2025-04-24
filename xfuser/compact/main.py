@@ -130,7 +130,6 @@ def compact_compress(
     x: torch.Tensor,
     compress_type: COMPACT_COMPRESS_TYPE,
     update_cache: bool = False,
-    override_rank: int = None,
 ):
     global _current_cache_key
     _current_cache_key = cache_key
@@ -144,7 +143,9 @@ def compact_compress(
         x = x.view(shape)
     assert x.ndim == 2
     # NOTE: reshaped to (N-token, channel)
-    rank = _config.comp_rank if override_rank is None else override_rank
+    rank = _config.comp_rank
+    if compress_type == COMPACT_COMPRESS_TYPE.BINARY and rank != -1:
+        assert ALLOW_DEPRECATED, "Binary compression with rank != -1 is deprecated"
     
     def cond_cache_put(key, val, delta):
         if update_cache:
@@ -282,7 +283,6 @@ def compact_decompress(
     compress_type: COMPACT_COMPRESS_TYPE,
     shape: tuple,
     update_cache: bool = False,
-    override_rank: int = None,
 ):
     global _current_cache_key
     _current_cache_key = cache_key
@@ -302,7 +302,7 @@ def compact_decompress(
     def cond_cache_put(key, val, delta):
         if update_cache:
             _cache.put(key, val, delta)
-    rank = _config.comp_rank if override_rank is None else override_rank
+    rank = _config.comp_rank
     if rank == -1:
         rank = 1 # effective rank is 1 for mean
 
