@@ -11,6 +11,8 @@ def get_config(model_name: str, method: str):
             config = _flux_lowrank12_config()
         elif method == "lowrank8":
             config = _flux_lowrank8_config()
+        elif method == "lowrankq32":
+            config = _flux_lowrankq32_config()
         # elif method == "lowrank16":
         #     config = _flux_lowrank16_config()
         elif method == "df":
@@ -30,6 +32,8 @@ def get_config(model_name: str, method: str):
             config = _pixart_lowrank12_config()
         elif method == "lowrank8":
             config = _pixart_lowrank8_config()
+        elif method == "lowrankq32":
+            config = _pixart_lowrankq32_config()
         # elif method == "lowrank16":
         #     config = _pixart_lowrank16_config()
         elif method == "df":
@@ -50,7 +54,7 @@ def get_config(model_name: str, method: str):
 def _flux_binary_config():
     return CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=-1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
@@ -83,10 +87,22 @@ def _flux_lowrank8_config():
         fastpath=False,
     )
 
+def _flux_lowrankq32_config():
+    return CompactConfig(
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK_Q if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=32,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=False,
+        fastpath=False,
+    )
+
 def _flux_lowrank16_config():
     return CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=16,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
@@ -141,7 +157,7 @@ def _flux_patch_config():
 def _pixart_binary_config():
     return CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=-1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
@@ -153,7 +169,7 @@ def _pixart_binary_config():
 def _pixart_lowrank12_config():
     return CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=12,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
@@ -165,8 +181,20 @@ def _pixart_lowrank12_config():
 def _pixart_lowrank8_config():
     return CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=8,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=False,
+        fastpath=False,
+    )
+
+def _pixart_lowrankq32_config():
+    return CompactConfig(
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK_Q if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=32,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False,
@@ -177,7 +205,7 @@ def _pixart_lowrank8_config():
 def _pixart_lowrank16_config():
     return CompactConfig(
         enabled=True,
-        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 4 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.LOW_RANK if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=16,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
