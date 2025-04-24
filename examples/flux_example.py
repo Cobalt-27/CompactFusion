@@ -83,7 +83,7 @@ def main():
     """
     from xfuser.compact.main import compact_init, compact_reset, compact_hello
     from examples.configs import get_config
-    compact_config = get_config("flux", "lowrank")
+    compact_config = get_config("Flux", "binary")
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -135,6 +135,8 @@ def main():
     else:
         LOOP_COUNT = 1
 
+    profiler = Profiler().instance()
+    profiler.disable()
     for i in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
@@ -158,11 +160,11 @@ def main():
         Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
         if local_rank == 0:
             stats_verbose()
-            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            print(str.join("\n", prof_result))
-            plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
-            plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            # print(str.join("\n", prof_result))
+            # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
+            # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # save_eigenvalues(save_dir="./results/eigenvalues")
             
     parallel_info = (

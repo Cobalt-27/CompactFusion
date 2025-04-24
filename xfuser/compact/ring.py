@@ -177,8 +177,8 @@ def _compact_ring_fwd(
     out = None
     lse = None
 
-    compress_type_k = compact_config().compress_func(mod_idx, current_iter, 'k')
-    compress_type_v = compact_config().compress_func(mod_idx, current_iter, 'v')
+    compress_type_k = compact_config().compress_func(mod_idx, current_iter)
+    compress_type_v = compact_config().compress_func(mod_idx, current_iter)
     assert compact_config().error_feedback, "error feedback must be enabled"
     
     k_my_cache_key = f"{mod_idx}-{comm.rank%comm.world_size}-k"

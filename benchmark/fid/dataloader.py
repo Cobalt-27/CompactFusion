@@ -20,7 +20,7 @@ features = Features({
 })
 
 def get_dataset():
-    parquet_dir = "/workspace/xDiT/.cache/huggingface/datasets/HuggingFaceM4___coco/validation_files"
+    parquet_dir = "/root/xDiT/.cache/huggingface/datasets/HuggingFaceM4___coco/validation_files"
     validation_files = [os.path.join(parquet_dir, f) for f in os.listdir(parquet_dir) if f.startswith("coco-validation") and f.endswith(".parquet")]
     dataset = Dataset.from_parquet(validation_files, features=features)
     return dataset

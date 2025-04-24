@@ -35,7 +35,7 @@ def main():
     """
     from xfuser.compact.main import compact_init, compact_reset, compact_hello
     from examples.configs import get_config
-    compact_config = get_config("flux", "lowrank")
+    compact_config = get_config("Flux", "binary")
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -52,14 +52,21 @@ def main():
         logging.info(f'rank {local_rank} sequential CPU offload enabled')
     else:
         pipe = pipe.to(f'cuda:{local_rank}')
+        
+    from xfuser.collector.collector import Collector, init
+    collector = Collector(
+        save_dir="./results/collector", 
+        target_steps=None,
+        target_layers=None,
+        enabled=False,
+        rank=local_rank
+    )
+    init(collector)
 
     pipe.prepare_run(input_config, steps=1)
     
-    from dataloader import get_dataset
     with open(args.caption_file, "r") as f:
         captions = json.load(f)
-    dataset = get_dataset()
-    filenames = dataset["filename"][:len(captions)]
     
     folder_path = args.sample_images_folder
     if not os.path.exists(folder_path):
@@ -90,7 +97,7 @@ def main():
         total_time.append(end_time - start_time)
         if input_config.output_type == 'pil':
             if pipe.is_dp_last_group():
-                for k, local_filename in enumerate(filenames[j:j+num_prompt_one_step]):
+                for k in range(num_prompt_one_step):
                     output.images[k].save(f'{folder_path}/{j+k:05d}.png')
         flush()
         
