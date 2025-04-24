@@ -69,7 +69,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "A man in glasses eating a donut out of a cup." \
+--prompt "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k" \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

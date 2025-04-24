@@ -108,6 +108,11 @@ class CompactConfig:
         else:
             assert self.patch_gather_fwd_config is None, "patch_gather_fwd_config must be None if override_with_patch_gather_fwd is False"
 
+    def get_compress_type(self):
+        compress_type = self.compress_func(0, 4)
+        if isinstance(compress_type, COMPACT_COMPRESS_TYPE):
+            return compress_type.name
+        return str(compress_type)
 
 from xfuser.compact.compress_quantize import quantize_int8, dequantize_int8
 from xfuser.compact.compress_lowrank import subspace_iter

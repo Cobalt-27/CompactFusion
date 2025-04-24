@@ -18,6 +18,44 @@ CFG = 1.5
 def flush():
     gc.collect()
     torch.cuda.empty_cache()
+    
+from examples.test_utils import TEST_ENABLE, test_hello
+from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
+from xfuser.compact.patchpara.df_utils import PatchConfig
+from xfuser.compact.main import CompactConfig, compact_init, compact_reset, compact_hello
+
+def customized_compact_config():
+    """
+    COMPACT
+    """
+    assert not TEST_ENABLE
+    prepared_patch_config = PatchConfig(
+        use_compact=False,
+        async_comm=True,
+        async_warmup=2,
+    )
+    OVERRIDE_WITH_PATCH_PARA = False
+    patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK_Q
+    compact_config = CompactConfig(
+        enabled=True,
+        override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
+        patch_gather_fwd_config=patch_config,
+        compress_func=lambda layer_idx, step, tag: (COMPACT_METHOD) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        sparse_ratio=8,
+        comp_rank=32 if not COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY else -1,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
+        log_stats=False,
+        check_consist=False,
+        fastpath=False and COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY,
+        ref_activation_path='ref_activations',
+        dump_activations=False,
+        calc_total_error=False,
+        delta_decay_factor=0.5
+    )
+    return compact_config
 
 def main():
     parser = FlexibleArgumentParser(description='xFuser Arguments')
@@ -33,9 +71,7 @@ def main():
     """
     COMPACT
     """
-    from xfuser.compact.main import compact_init, compact_reset, compact_hello
-    from examples.configs import get_config
-    compact_config = get_config("Flux", "binary")
+    compact_config = customized_compact_config()
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"

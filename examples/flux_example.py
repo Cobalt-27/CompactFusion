@@ -45,13 +45,13 @@ def customized_compact_config():
         enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
-        compress_func=lambda layer_idx, step, tag: (COMPACT_METHOD) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=32 if not COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
-        log_stats=True,
+        log_stats=False,
         check_consist=False,
         fastpath=False and COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY,
         ref_activation_path='ref_activations',
@@ -83,7 +83,7 @@ def main():
     """
     from xfuser.compact.main import compact_init, compact_reset, compact_hello
     from examples.configs import get_config
-    compact_config = get_config("Flux", "binary")
+    compact_config = customized_compact_config()
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -158,8 +158,8 @@ def main():
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
         Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
-        if local_rank == 0:
-            stats_verbose()
+        # if local_rank == 0:
+        #     stats_verbose()
             # prof_result = prof_summary(Profiler.instance(), rank=local_rank)
             # print(str.join("\n", prof_result))
             # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
@@ -183,7 +183,7 @@ def main():
         if pipe.is_dp_last_group():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
-                image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
+                image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}_{compact_config.get_compress_type()}.png"
                 image.save(f"./results/{image_name}")
                 print(f"image {i} saved to ./results/{image_name}")
 
