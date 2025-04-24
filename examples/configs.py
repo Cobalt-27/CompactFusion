@@ -115,7 +115,7 @@ def _flux_distrifusion_config():
     patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
-        async_warmup=2,
+        async_warmup=1,
     )
     return CompactConfig(
         enabled=True,
@@ -140,7 +140,7 @@ def _flux_patch_config():
     patch_config = PatchConfig(
         use_compact=False,
         async_comm=False,
-        async_warmup=2,
+        async_warmup=1,
     )
     return CompactConfig(
         enabled=True,

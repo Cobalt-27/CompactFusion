@@ -83,7 +83,8 @@ def main():
     """
     from xfuser.compact.main import compact_init, compact_reset, compact_hello
     from examples.configs import get_config
-    compact_config = customized_compact_config()
+    compact_config = get_config("flux", "lowrank")
+    # compact_config = customized_compact_config()
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -141,16 +142,17 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
-        output = pipe(
-            height=input_config.height,
-            width=input_config.width,
-            prompt=input_config.prompt,
-            num_inference_steps=input_config.num_inference_steps,
-            output_type=input_config.output_type,
-            max_sequence_length=256,
-            guidance_scale=0.0,
-            generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
-        )
+        with Profiler.instance().scope("total"):
+            output = pipe(
+                height=input_config.height,
+                width=input_config.width,
+                prompt=input_config.prompt,
+                num_inference_steps=input_config.num_inference_steps,
+                output_type=input_config.output_type,
+                max_sequence_length=256,
+                guidance_scale=0.0,
+                generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
+            )
         end_time = time.time()
         elapsed_time = end_time - start_time
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
