@@ -2,9 +2,7 @@ import triton
 import triton.language as tl
 import torch
 from xfuser.prof import Profiler
-from xfuser.compact.compress_quantize import dequantize_1bit
-from xfuser.compact.compress_quantize import quantize_1bit
-# from xfuser.compact.compress_quantize import quantize_1bit # Not needed for sim
+from xfuser.compact.compress_quantize import dequantize_1bit, quantize_1bit
 # Import subspace iter for rank-1 scale approximation
 from xfuser.compact.compress_lowrank import subspace_iter
 

@@ -336,13 +336,14 @@ def sim_binary(input_tensor: torch.Tensor, rank: int|None = None) -> torch.Tenso
 
 
 @torch.compile
-def sim_int2(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Tensor:
+def sim_int2(input_tensor: torch.Tensor) -> torch.Tensor:
     """
     Simulates channel-wise INT2 quantization with mean-based scaling.
-    This is a simulation function for the INT2 compression type.
+    Aligned with quantize_int2/dequantize_int2 logic regarding casting and epsilon,
+    but uses torch.where for level assignment for simplicity.
     
     Maps input values to 4 levels based on per-channel mean absolute value:
-    [-2*mean_abs, -0.5*mean_abs, +0.5*mean_abs, +2*mean_abs]
+    [-2*scale_hf, -0.5*scale_hf, +0.5*scale_hf, +2*scale_hf] (using half-precision scale)
     
     Args:
         input_tensor: 2D tensor (N, C) with dtype torch.half
@@ -351,32 +352,37 @@ def sim_int2(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Te
         Simulated dequantized tensor with same shape and dtype
     """
     assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
-    # assert input_tensor.dtype == torch.half, f"Input tensor must be torch.half, but got {input_tensor.dtype}."
+    assert input_tensor.dtype == torch.half, f"Input tensor must be torch.half, but got {input_tensor.dtype}."
     input_dtype = input_tensor.dtype
 
-    reduce_dims = 0
+    # Calculate scales in float32 for intermediate precision
     input_float32 = input_tensor.float()
     abs_input = torch.abs(input_float32)
-
-    chan_scale = torch.mean(abs_input, dim=reduce_dims, keepdim=True) if scale is None else scale
+    chan_scale = torch.mean(abs_input, dim=0, keepdim=True) 
     tok_scale = torch.mean(abs_input, dim=1, keepdim=True)
-    tok_scale = tok_scale / tok_scale.mean()
-    scale = chan_scale * tok_scale
-    # 2 seems to be better than 1.5
-    level_pp = 2 * scale
-    level_p  = 0.5 * scale
-    level_n  = -0.5 * scale
-    level_nn = -2 * scale
+    # Normalize tok_scale with epsilon, matching quantize_int2
+    tok_mean = tok_scale.mean()
+    tok_scale = tok_scale / (tok_mean + 1e-6) 
+    
+    # Calculate threshold scale and cast to half, matching quantize_int2
+    scale_threshold_hf = (chan_scale * tok_scale).to(torch.half) 
 
-    output = torch.zeros_like(input_float32)
+    # Calculate levels using the half-precision scale threshold
+    level_pp =  2.0 * scale_threshold_hf
+    level_p  =  0.5 * scale_threshold_hf
+    level_n  = -0.5 * scale_threshold_hf
+    level_nn = -2.0 * scale_threshold_hf
 
-    output = torch.where((input_float32 >= 0) & (input_float32 <= scale), level_p, output)
-    output = torch.where(input_float32 > scale, level_pp, output)
-    output = torch.where((input_float32 < 0) & (input_float32 >= -scale), level_n, output)
-    output = torch.where(input_float32 < -scale, level_nn, output)
+    # Assign levels using torch.where, comparing the original half-precision input 
+    # against the half-precision threshold.
+    output = torch.zeros_like(input_tensor, dtype=torch.half) # Start with zeros in half precision
+    output = torch.where(input_tensor < -scale_threshold_hf, level_nn, output)
+    output = torch.where((input_tensor >= -scale_threshold_hf) & (input_tensor < 0), level_n, output)
+    output = torch.where((input_tensor >= 0) & (input_tensor <= scale_threshold_hf), level_p, output)
+    output = torch.where(input_tensor > scale_threshold_hf, level_pp, output)
 
-    dequantized_tensor = output.to(input_dtype)
-    return dequantized_tensor
+    # Return in original dtype (which is half)
+    return output
 
 @torch.compile
 def quantize_int8(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -445,7 +451,7 @@ def sim_int4(input_tensor: torch.Tensor, dim) -> torch.Tensor:
     """
     assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
     # Keep original dtype, expected to be float16
-    dtype = input_tensor.dtype 
+    dtype = input_tensor.dtype
 
     # Calculate min/max along the specified dimension using input dtype
     val_max = torch.max(input_tensor, dim=dim, keepdim=True)[0]
@@ -588,6 +594,114 @@ def _dequantize_int4(
     # scale and min_val have shape (1, C), they will broadcast correctly
     dequantized_tensor = unpacked_quantized.to(torch.half) * scale + min_val
 
+    assert dequantized_tensor.shape == output_shape
+    assert dequantized_tensor.dtype == torch.half
+    return dequantized_tensor
+
+@torch.compile
+def quantize_int2(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Performs channel-wise INT2 quantization using sign and magnitude bits.
+    Maps input values to 4 levels based on per-channel mean absolute value scaling.
+    Packs four 2-bit indices into a single uint8 byte along the C dimension.
+    Uses bitwise operations for index calculation and packing.
+
+    Index Mapping (Bit1 = Sign, Bit0 = Magnitude > Threshold):
+    - Index 0 (00): -scale <= x < 0
+    - Index 1 (01): x < -scale
+    - Index 2 (10): 0 <= x <= scale
+    - Index 3 (11): x > scale
+
+    Args:
+        input_tensor: A 2D PyTorch tensor (shape [N, C]) of dtype float16.
+                      C must be divisible by 4.
+
+    Returns:
+        A tuple containing:
+        - packed_indices: The packed quantized indices (dtype torch.uint8), shape (N, C/4).
+        - chan_scale: Channel-wise scale factor (dtype float16), shape (1, C).
+        - tok_scale: Token-wise scale factor (dtype float16), shape (N, 1).
+    """
+    assert input_tensor.dim() == 2, "Input tensor must be 2D"
+    assert input_tensor.dtype == torch.half, "Input tensor must be FP16"
+    N, C = input_tensor.shape
+    assert C % 4 == 0, f"Dimension C must be divisible by 4 for INT2 packing, got {C}"
+    input_float32 = input_tensor.float()
+    abs_input = torch.abs(input_float32)
+    chan_scale = torch.mean(abs_input, dim=0, keepdim=True) # Shape (1, C)
+    tok_scale = torch.mean(abs_input, dim=1, keepdim=True)  # Shape (N, 1)
+    # Normalize tok_scale (use epsilon to avoid division by zero if mean is zero)
+    tok_mean = tok_scale.mean()
+    tok_scale = tok_scale / (tok_mean + 1e-6)
+    # Combine scales to get the thresholding scale (N, C)
+    scale_threshold = (chan_scale * tok_scale).to(torch.half) # Back to half for comparison
+    chan_scale_ret = chan_scale.to(torch.half)
+    tok_scale_ret = tok_scale.to(torch.half)
+    sign_bit = (input_tensor >= 0).to(torch.uint8)            # 0 for neg, 1 for non-neg
+    magnitude_bit = (torch.abs(input_tensor) > scale_threshold).to(torch.uint8) # 0 for small mag, 1 for large mag
+    indices = (sign_bit << 1) | magnitude_bit # Combine bits: sign is left (bit 1), magnitude is right (bit 0)
+    # Resulting indices: 0, 1, 2, 3
+    indices_reshaped = indices.view(N, C // 4, 4)
+    shifts = torch.tensor([0, 2, 4, 6], dtype=torch.uint8, device=indices.device).view(1, 1, 4)
+
+    # Shift and reduce using bitwise OR
+    shifted_indices = indices_reshaped << shifts
+    packed_indices = torch.sum(shifted_indices, dim=2).to(torch.uint8)
+
+    packed_indices = packed_indices.contiguous() # Ensure contiguity
+
+    assert packed_indices.dtype == torch.uint8
+    assert packed_indices.shape == (N, C // 4)
+    assert chan_scale_ret.shape == (1, C)
+    assert tok_scale_ret.shape == (N, 1)
+
+    return packed_indices, chan_scale_ret, tok_scale_ret
+
+@torch.compile
+def dequantize_int2(
+    packed_indices: torch.Tensor, # Shape (N, C/4), uint8
+    chan_scale: torch.Tensor,     # Shape (1, C), float16
+    tok_scale: torch.Tensor       # Shape (N, 1), float16
+) -> torch.Tensor:
+    """
+    Dequantizes a packed INT2 tensor back to float16 using channel and token scales.
+    Uses bitwise operations for unpacking and determines levels based on sign/magnitude bits.
+
+    Args:
+        packed_indices: Packed uint8 tensor containing 2-bit indices (shape N, C/4).
+        chan_scale: Channel-wise scale factor (shape 1, C).
+        tok_scale: Token-wise scale factor (shape N, 1).
+
+    Returns:
+        The dequantized tensor (dtype torch.half), shape (N, C).
+    """
+    assert packed_indices.dtype == torch.uint8, "Packed tensor must be UINT8"
+    assert chan_scale.dtype == torch.half, "Channel scale must be FP16"
+    assert tok_scale.dtype == torch.half, "Token scale must be FP16"
+    assert chan_scale.dim() == 2 and chan_scale.shape[0] == 1, "Chan scale shape error"
+    assert tok_scale.dim() == 2 and tok_scale.shape[1] == 1, "Tok scale shape error"
+
+    N_packed, C_packed = packed_indices.shape
+    N = tok_scale.shape[0]
+    C = chan_scale.shape[1]
+    assert N_packed == N, "N dimension mismatch between packed indices and token scale"
+    assert C_packed * 4 == C, "C dimension mismatch between packed indices and channel scale"
+    assert C % 4 == 0
+
+    output_shape = (N, C)
+    scale_matrix = (chan_scale * tok_scale).to(torch.half) # Shape (N, C)
+    packed_expanded = packed_indices.unsqueeze(2) # Shape (N, C/4, 1)
+    masks = torch.tensor([0x03, 0x0C, 0x30, 0xC0], dtype=torch.uint8, device=packed_indices.device).view(1, 1, 4)
+    shifts = torch.tensor([0, 2, 4, 6], dtype=torch.uint8, device=packed_indices.device).view(1, 1, 4)
+    unpacked_shifted = (packed_expanded & masks) >> shifts
+    unpacked_indices = unpacked_shifted.view(N, C) # Shape (N, C), values 0, 1, 2, 3
+    sign_bit = (unpacked_indices >> 1) # 0 for indices 0,1; 1 for indices 2,3
+    magnitude_bit = unpacked_indices & 1 # 0 for indices 0,2; 1 for indices 1,3
+    level_small_mag = 0.5 * scale_matrix
+    level_large_mag = 2.0 * scale_matrix
+    magnitude_levels = torch.where(magnitude_bit == 0, level_small_mag, level_large_mag)
+    sign_multiplier = (sign_bit.to(torch.half) * 2.0) - 1.0
+    dequantized_tensor = sign_multiplier * magnitude_levels
     assert dequantized_tensor.shape == output_shape
     assert dequantized_tensor.dtype == torch.half
     return dequantized_tensor

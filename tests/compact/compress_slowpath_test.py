@@ -13,6 +13,9 @@ from xfuser.compact.compress_quantize import (
     quantize_int4,
     dequantize_int4,
     sim_int4,
+    quantize_int2,
+    dequantize_int2,
+    sim_int2,
 )
 from xfuser.compact.compress_lowrank import svd, subspace_iter
 from xfuser.compact.compress_topk import SPARSE_LAST_DIM_SIZE
@@ -240,6 +243,25 @@ def test_int4_quantization(
         # Compare actual decompressed with simulated
         # Use a slightly looser tolerance for quantization approximation
         assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=INT4_TOL, desc="INT4 Quantization")
+
+@pytest.mark.parametrize(
+    "N,C", [(1024, 2048), (512, 4096), (256, 8192)] # C must be divisible by 4
+)  # Large tensor sizes
+@pytest.mark.parametrize("seed", [42, 43, 44])
+def test_int2_quantization(
+    N, C, seed
+):
+    """Test INT2 quantization and dequantization against simulation."""
+    assert C % 4 == 0, "C must be divisible by 4 for INT2 test"
+    for i in range(LOOP_CNT):
+        loop_seed = seed + i
+        torch.manual_seed(loop_seed)
+        input_tensor = torch.randn((N, C), dtype=torch.half, device="cuda")
+        # Note: sim_int2 returns the dequantized tensor directly
+        quantized_simulated = sim_int2(input_tensor)
+        packed_tensor, chan_scale, tok_scale = quantize_int2(input_tensor)
+        decompressed_tensor = dequantize_int2(packed_tensor, chan_scale, tok_scale)
+        assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=1e-2, desc="INT2 Quantization")
 
 # Run tests
 if __name__ == "__main__":
