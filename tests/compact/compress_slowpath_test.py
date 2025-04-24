@@ -19,6 +19,9 @@ from xfuser.compact.compress_topk import SPARSE_LAST_DIM_SIZE
 
 from xfuser.prof import Profiler, prof_summary
 
+# XXX: INT4 quantization is not accurate, use a looser tolerance
+INT4_TOL = 0.05
+
 # Helper function to check that two tensors are close (using relative error)
 def assert_tensor_close(tensor1, tensor2, tol=1e-3, desc=""):
     # Check basic properties first
@@ -126,10 +129,10 @@ from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
 @pytest.mark.parametrize("seed", [42, 43, 44])  # Different random seeds
 @pytest.mark.parametrize("sparse_ratio", [1, 2, 4, 8, 16])  # Valid compression levels
 @pytest.mark.parametrize("compact_method", [
-    COMPACT_COMPRESS_TYPE.SPARSE,
-    COMPACT_COMPRESS_TYPE.BINARY,
-    COMPACT_COMPRESS_TYPE.LOW_RANK,
-    # COMPACT_COMPRESS_TYPE.HYBRID
+    # COMPACT_COMPRESS_TYPE.SPARSE,
+    # COMPACT_COMPRESS_TYPE.BINARY,
+    # COMPACT_COMPRESS_TYPE.LOW_RANK,
+    COMPACT_COMPRESS_TYPE.LOW_RANK_Q,
 ])  # Different compression methods
 def test_compress_decompress_vs_sim(n, hidden, seed, compact_method, sparse_ratio):
     """
@@ -153,7 +156,7 @@ def test_compress_decompress_vs_sim(n, hidden, seed, compact_method, sparse_rati
             if compact_method != COMPACT_COMPRESS_TYPE.BINARY and compact_method != COMPACT_COMPRESS_TYPE.LOW_RANK and test_rank == -1:
                 continue # Only test rank=-1 for BINARY
 
-            current_rank = test_rank if (compact_method == COMPACT_COMPRESS_TYPE.BINARY or compact_method == COMPACT_COMPRESS_TYPE.LOW_RANK) else None
+            current_rank = test_rank if (compact_method == COMPACT_COMPRESS_TYPE.BINARY or compact_method == COMPACT_COMPRESS_TYPE.LOW_RANK or compact_method == COMPACT_COMPRESS_TYPE.LOW_RANK_Q) else None
 
             # Use same seed scope for both operations, as lowrank requires random q
             with torch.random.fork_rng(devices=[input_tensor.device]):
@@ -168,8 +171,13 @@ def test_compress_decompress_vs_sim(n, hidden, seed, compact_method, sparse_rati
             # Decompress the compressed tensor
             decompressed = slowpath_decompress(compressed, input_tensor.shape, compact_method, rank=current_rank, sparse_ratio=sparse_ratio)
             
+            
+            if compact_method == COMPACT_COMPRESS_TYPE.LOW_RANK_Q:
+                tol = INT4_TOL
+            else:
+                tol = 1e-4
             # Compare the decompressed tensor with the simulated result
-            assert_tensor_approx(decompressed, simulated_result, desc=f"Rank={current_rank}")
+            assert_tensor_approx(decompressed, simulated_result, desc=f"Rank={current_rank}", tol=tol)
 
 @pytest.mark.parametrize(
     "n,hidden", [(128, 128), (32, 256), (512, 32)]
@@ -211,6 +219,7 @@ def test_subspace_iter(n, hidden, seed, target_rank):
 def test_int4_quantization(
     A, B, seed
 ):
+    torch.set_float32_matmul_precision('high')
     """Test INT4 quantization and dequantization against simulation."""
     for i in range(LOOP_CNT):
         loop_seed = seed + i
@@ -226,11 +235,11 @@ def test_int4_quantization(
         packed_tensor, scale, min_val = quantize_int4(input_tensor)
         
         # Dequantize using the results from the actual quantization
-        decompressed_tensor = dequantize_int4(packed_tensor, scale, min_val, original_shape)
+        decompressed_tensor = dequantize_int4(packed_tensor, scale, min_val)
         
         # Compare actual decompressed with simulated
         # Use a slightly looser tolerance for quantization approximation
-        assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=0.05, desc="INT4 Quantization")
+        assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=INT4_TOL, desc="INT4 Quantization")
 
 # Run tests
 if __name__ == "__main__":

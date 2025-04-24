@@ -472,8 +472,12 @@ def sim_int4(input_tensor: torch.Tensor, dim) -> torch.Tensor:
     # Return in original dtype
     return dequantized_vals
 
-@torch.compile
 def quantize_int4(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with Profiler.scope("compact.quantize_int4"):
+        return _quantize_int4(input_tensor)
+
+@torch.compile
+def _quantize_int4(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Performs channel-wise INT4 affine quantization (0 to 15) on a 2D input tensor.
     Scaling (min/max) is calculated along dim=0 (N dimension).
@@ -531,12 +535,19 @@ def quantize_int4(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 
     return packed_quantized_tensor, scale, min_val
 
-@torch.compile
 def dequantize_int4(
     packed_tensor: torch.Tensor, # Shape (N/2, C)
     scale: torch.Tensor,         # Shape (1, C)
     min_val: torch.Tensor,       # Shape (1, C)
-    output_shape: tuple        # Original shape (N, C)
+) -> torch.Tensor:
+    with Profiler.scope("compact.dequantize_int4"):
+        return _dequantize_int4(packed_tensor, scale, min_val)
+
+@torch.compile
+def _dequantize_int4(
+    packed_tensor: torch.Tensor, # Shape (N/2, C)
+    scale: torch.Tensor,         # Shape (1, C)
+    min_val: torch.Tensor,       # Shape (1, C)
 ) -> torch.Tensor:
     """
     Dequantizes a packed INT4 tensor (stored as uint8) back to float16.
@@ -555,8 +566,10 @@ def dequantize_int4(
     assert packed_tensor.dtype == torch.uint8, "Packed tensor must be UINT8"
     assert scale.dtype == torch.half, "Scale must be FP16"
     assert min_val.dtype == torch.half, "min_val must be FP16"
-    assert len(output_shape) == 2, "Currently only support 2D output shapes"
-    N, C = output_shape
+    N = packed_tensor.shape[0] * 2
+    C = packed_tensor.shape[1]
+    output_shape = (N, C)
+    
     assert N % 2 == 0, f"Original dimension N (0) size must be even for INT4 unpacking, got {N}"
     assert packed_tensor.shape == (N // 2, C), f"Packed tensor shape mismatch. Expected {(N // 2, C)}, got {packed_tensor.shape}"
     assert scale.shape == (1, C), f"Scale shape mismatch. Expected {(1, C)}, got {scale.shape}"

@@ -12,13 +12,13 @@ from xfuser.compact.compress_quantize import (
     sim_binary,
     sim_int2,
     sim_int4,
+    quantize_int4,
+    dequantize_int4,
 )
 from xfuser.compact.compress_lowrank import (
     subspace_iter,
 )
 from xfuser.compact.utils import (
-    CompactConfig,
-    CompactCache,
     COMPACT_COMPRESS_TYPE,
 )
 
@@ -59,6 +59,19 @@ def slowpath_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, ran
         assert u.size(1) == v.size(0) and u.dtype == torch.half and v.dtype == torch.half
         # contiguous() is necessary for later cat
         comp_list = [u.contiguous(), v.contiguous()]
+    elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK_Q:
+        assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK_Q compression"
+        u, v, _ = subspace_iter(x, rank, 2)
+        assert u.size(1) == v.size(0)
+        u = u.half()
+        v = v.half()
+        q_u, scale_u, min_u = quantize_int4(u)
+        q_v, scale_v, min_v = quantize_int4(v.t())
+        q_u = q_u.view(torch.half)
+        q_v = q_v.view(torch.half)
+        assert scale_u.dtype == torch.half and scale_v.dtype == torch.half
+        assert min_u.dtype == torch.half and min_v.dtype == torch.half
+        comp_list = [q_u.contiguous(), scale_u.contiguous(), min_u.contiguous(), q_v.contiguous(), scale_v.contiguous(), min_v.contiguous()]
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
         assert sparse_ratio is not None, "sparse_ratio must be provided for SPARSE compression"
         val, idx = topk_compress(x.view(-1, SPARSE_LAST_DIM_SIZE), sparse_ratio)
@@ -105,6 +118,15 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:
         assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK decompression"
         split_size = [N * rank, rank * C] # Correct shape for u(N,K) and v(K,C)
+    elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK_Q:
+        assert rank is not None and rank >= 1, "Rank must be provided for LOW_RANK_Q decompression"
+        # layout: q_u, scale_u, min_u, q_v, scale_v, min_v
+        lowrank_u_numel = N * rank
+        lowrank_v_numel = C * rank
+        chan_size = rank
+        assert lowrank_u_numel % 4 == 0 and lowrank_v_numel % 4 == 0, f"LOW_RANK_Q split error. uN: {lowrank_u_numel}, vN: {lowrank_v_numel}"
+        split_size = [lowrank_u_numel//4, chan_size, chan_size, lowrank_v_numel//4, chan_size, chan_size]
+        
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
         # val and idx have same count, but idx is 4-bit
         split_size = [numel // sparse_ratio, numel // sparse_ratio // 4]
@@ -129,6 +151,16 @@ def slowpath_decompress(x: torch.Tensor, shape: tuple, compress_type: COMPACT_CO
         u = split_list[0].view(N, rank) # Reshape to (N, K)
         v = split_list[1].view(rank, C) # Reshape to (K, C)
         return torch.matmul(u, v)
+    elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK_Q:
+        q_u = split_list[0].view(torch.uint8).view(N//2, rank)
+        scale_u = split_list[1].view(1, rank)
+        min_u = split_list[2].view(1, rank)
+        q_v = split_list[3].view(torch.uint8).view(C//2, rank)
+        scale_v = split_list[4].view(1, rank)
+        min_v = split_list[5].view(1, rank)
+        u = dequantize_int4(q_u, scale_u, min_u)
+        v = dequantize_int4(q_v, scale_v, min_v)
+        return torch.matmul(u, v.t())
     elif compress_type == COMPACT_COMPRESS_TYPE.SPARSE:
         idx_last_dim_size = SPARSE_LAST_DIM_SIZE//sparse_ratio
         val_last_dim_size = SPARSE_LAST_DIM_SIZE//sparse_ratio//4
