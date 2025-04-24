@@ -116,18 +116,19 @@ def test_int2_fastpath_e2e_vs_sim(shape, seed, update_cache):
     base = (torch.randn_like(x) * 0.1).contiguous()
 
     # --- Quantization Step --- 
-    kernel_quant_args = (x, base, update_cache)
-    sim_quant_args = (x, base, update_cache)
+    # Add rank=-1, although it's default and enforced inside
+    kernel_quant_args = (x, base, update_cache, -1) 
+    sim_quant_args = (x, base, update_cache, -1)
 
     with torch.random.fork_rng(devices=['cuda']):
         torch.manual_seed(seed)
-        # Returns: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), new_base(N,C)|None
-        packed_k, chan_scale_k, tok_scale_k, new_base_k = int2_quant_fastpath(*kernel_quant_args)
+        # Returns: packed(N,C//4), scale_u(N,1), scale_v(C,1), new_base(N,C)|None
+        packed_k, scale_u_k, scale_v_k, new_base_k = int2_quant_fastpath(*kernel_quant_args)
     
     with torch.random.fork_rng(devices=['cuda']):
         torch.manual_seed(seed)
-        # Returns: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), new_base(N,C)|None
-        packed_s, chan_scale_s, tok_scale_s, new_base_s = sim_int2_quant_fastpath(*sim_quant_args)
+        # Returns: packed(N,C//4), scale_u(N,1), scale_v(C,1), new_base(N,C)|None
+        packed_s, scale_u_s, scale_v_s, new_base_s = sim_int2_quant_fastpath(*sim_quant_args)
 
     # Use binary comparison for packed data (allow 0.1% mismatch)
     assert_tensor_close_binary(packed_k, packed_s, desc="Quant INT2: Packed", tol=1e-3)
@@ -135,21 +136,25 @@ def test_int2_fastpath_e2e_vs_sim(shape, seed, update_cache):
     assert packed_s.shape == (N, C // 4)
 
     # Use standard float comparison for scales and base
-    assert chan_scale_k.shape == (1, C)
-    assert chan_scale_s.shape == (1, C)
-    assert tok_scale_k.shape == (N, 1)
-    assert tok_scale_s.shape == (N, 1)
-    assert_tensor_approx(chan_scale_k, chan_scale_s, desc="Quant INT2: Chan Scale (1,C)", tol=INT2_FASTPATH_TOL)
-    assert_tensor_approx(tok_scale_k, tok_scale_s, desc="Quant INT2: Tok Scale (N,1)", tol=INT2_FASTPATH_TOL)
+    # Check shapes match U(N,1), V(C,1)
+    assert scale_u_k.shape == (N, 1)
+    assert scale_u_s.shape == (N, 1)
+    assert scale_v_k.shape == (C, 1)
+    assert scale_v_s.shape == (C, 1)
+    # Compare scales U and V
+    assert_tensor_approx(scale_u_k, scale_u_s, desc="Quant INT2: Scale U (N,1)", tol=INT2_FASTPATH_TOL)
+    assert_tensor_approx(scale_v_k, scale_v_s, desc="Quant INT2: Scale V (C,1)", tol=INT2_FASTPATH_TOL)
+    
     if update_cache:
         assert new_base_k is not None and new_base_s is not None
         assert_tensor_approx(new_base_k, new_base_s, desc="Quant INT2: New Base (N,C)", tol=INT2_FASTPATH_TOL)
     else:
         assert new_base_k is None and new_base_s is None
+        
     # --- Dequantization Step --- 
-    # Args: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), base(N,C)
-    kernel_dequant_args = (packed_k, chan_scale_k, tok_scale_k, base)
-    sim_dequant_args = (packed_s, chan_scale_s, tok_scale_s, base)
+    # Args: packed(N,C//4), scale_u(N,1), scale_v(C,1), base(N,C)
+    kernel_dequant_args = (packed_k, scale_u_k, scale_v_k, base)
+    sim_dequant_args = (packed_s, scale_u_s, scale_v_s, base)
 
     recon_k = int2_dequant_fastpath(*kernel_dequant_args)
     recon_s = sim_int2_dequant_fastpath(*sim_dequant_args)

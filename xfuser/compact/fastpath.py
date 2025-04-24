@@ -144,8 +144,6 @@ def binary_quant_fastpath(
     assert base_tensor_nc.dtype == torch.half
     assert x_tensor_nc.ndim == 2 and base_tensor_nc.ndim == 2
     assert x_tensor_nc.shape == base_tensor_nc.shape
-    assert x_tensor_nc.is_cuda and base_tensor_nc.is_cuda
-
 
     x_tensor_nc = x_tensor_nc.contiguous()
     base_tensor_nc = base_tensor_nc.contiguous()
@@ -376,7 +374,7 @@ def _binary_dequant_fastpath(
 
 @Profiler.prof_func("compact.binary_dequant_fastpath")
 def binary_dequant_fastpath(
-    packed_in_nc8: torch.Tensor,    # Input packed delta (N, C//8) uint8
+    packed: torch.Tensor,    # Input packed delta (N, C//8) uint8
     scale_u_nk: torch.Tensor,       # Input scale u (N, K)
     scale_v_ck: torch.Tensor,       # Input scale v (C, K)
     base_nc: torch.Tensor,         # Input base cache (N, C) half
@@ -391,19 +389,17 @@ def binary_dequant_fastpath(
     Output: reconstructed(N, C)
     """
     # Assertions
-    assert packed_in_nc8.dtype == torch.uint8
+    assert packed.dtype == torch.uint8
     assert scale_u_nk.dtype == torch.half and scale_v_ck.dtype == torch.half
     assert base_nc.dtype == torch.half
-    assert packed_in_nc8.ndim == 2 and scale_u_nk.ndim == 2 and scale_v_ck.ndim == 2 and base_nc.ndim == 2
+    assert packed.ndim == 2 and scale_u_nk.ndim == 2 and scale_v_ck.ndim == 2 and base_nc.ndim == 2
 
-    assert packed_in_nc8.is_cuda and scale_u_nk.is_cuda and scale_v_ck.is_cuda and base_nc.is_cuda
-
-    packed_in_nc8 = packed_in_nc8.contiguous()
+    packed = packed.contiguous()
     scale_u_nk = scale_u_nk.contiguous()
     scale_v_ck = scale_v_ck.contiguous()
     base_nc = base_nc.contiguous()
 
-    N_ROWS, C_COLS_8 = packed_in_nc8.shape
+    N_ROWS, C_COLS_8 = packed.shape
     C_COLS = C_COLS_8 * 8
     effective_rank = scale_u_nk.shape[1] # Infer rank from scale U
     assert effective_rank >= 1, "Inferred rank from scale_u must be >= 1"
@@ -426,7 +422,7 @@ def binary_dequant_fastpath(
 
     with Profiler.scope("compact._binary_dequant_fastpath"):
         _binary_dequant_fastpath[grid](
-            packed_in_nc8,
+            packed,
             scale_u_nk, scale_v_ck, # Pass U(N,K), V(C,K)
             base_nc,
             reconstructed_output_nc,
@@ -434,7 +430,7 @@ def binary_dequant_fastpath(
             N_ROWS=N_ROWS, C_COLS=C_COLS, C_COLS_8=C_COLS_8,
             RANK=effective_rank, # Pass inferred effective rank
             # --- Strides (N, C Layout) ---
-            stride_packed_n=packed_in_nc8.stride(0), stride_packed_c8=packed_in_nc8.stride(1),
+            stride_packed_n=packed.stride(0), stride_packed_c8=packed.stride(1),
             stride_scale_un=scale_u_nk.stride(0), stride_scale_uk=scale_u_nk.stride(1),
             stride_scale_vc=scale_v_ck.stride(0), stride_scale_vk=scale_v_ck.stride(1),
             stride_base_n=base_nc.stride(0), stride_base_c=base_nc.stride(1),
@@ -768,18 +764,23 @@ def int2_quant_fastpath(
     x_tensor_nc: torch.Tensor,        # Input (N, C)
     base_tensor_nc: torch.Tensor,     # Input (N, C)
     update_cache: bool,
+    rank: int = -1,                   # Add rank argument for interface consistency
 ):
     """
     Quantizes delta (x - base) to 2-bit using fast path kernel. Input/Output (N, C).
     Calculates channel and token scales based on delta.
-    Returns: packed(N, C//4), chan_scale(1,C), tok_scale(N,1), new_base(N,C)|None
+    Matches binary interface by returning scales as U(N,1), V(C,1).
+
+    Returns: packed(N, C//4), scale_u(N,1), scale_v(C,1), new_base(N,C)|None
     """
     # Assertions
+    assert rank == -1, "INT2 fastpath only supports channel/token scales (rank=-1 equivalent)" # Enforce rank=-1
     assert x_tensor_nc.dtype == torch.half
     assert base_tensor_nc.dtype == torch.half
     assert x_tensor_nc.ndim == 2 and base_tensor_nc.ndim == 2
     assert x_tensor_nc.shape == base_tensor_nc.shape
-    assert x_tensor_nc.is_cuda and base_tensor_nc.is_cuda
+    # Assert is_cuda removed for potential future CPU compatibility if needed
+    # assert x_tensor_nc.is_cuda and base_tensor_nc.is_cuda
 
     x_tensor_nc = x_tensor_nc.contiguous()
     base_tensor_nc = base_tensor_nc.contiguous()
@@ -798,8 +799,8 @@ def int2_quant_fastpath(
         tok_mean = tok_scale_n1.mean()
         tok_scale_n1 = tok_scale_n1 / (tok_mean + 1e-6)
         # Keep scales in float16 for kernel
-        chan_scale_1c = chan_scale_1c.to(torch.half).contiguous()
-        tok_scale_n1 = tok_scale_n1.to(torch.half).contiguous()
+        chan_scale_1c_half = chan_scale_1c.to(torch.half).contiguous()
+        tok_scale_n1_half = tok_scale_n1.to(torch.half).contiguous()
 
     # Allocate outputs
     packed_output_nc4 = torch.empty((N_ROWS, C_COLS_4), dtype=torch.uint8, device=x_tensor_nc.device)
@@ -814,10 +815,11 @@ def int2_quant_fastpath(
     stride_newb_n = new_base_ptr.stride(0) if update_cache else 0
     stride_newb_c = new_base_ptr.stride(1) if update_cache else 0
 
+    # Kernel still needs (1,C) and (N,1) scales internally
     with Profiler.scope("compact._int2_quant_fastpath"):
          _int2_quant_fastpath[grid](
              x_tensor_nc, base_tensor_nc,
-             chan_scale_1c, tok_scale_n1, # Pass calculated scales
+             chan_scale_1c_half, tok_scale_n1_half, # Pass calculated scales (1,C), (N,1)
              packed_output_nc4,
              new_base_ptr,
              # --- Dimensions (Passed as constexpr) ---
@@ -825,8 +827,8 @@ def int2_quant_fastpath(
              # --- Strides ---
              stride_xn=x_tensor_nc.stride(0), stride_xc=x_tensor_nc.stride(1),
              stride_bn=base_tensor_nc.stride(0), stride_bc=base_tensor_nc.stride(1),
-             stride_chansc_c=chan_scale_1c.stride(1), # Stride N is 0 for chan_scale
-             stride_toksc_n=tok_scale_n1.stride(0),    # Stride C is 0 for tok_scale
+             stride_chansc_c=chan_scale_1c_half.stride(1), # Stride N is 0 for chan_scale
+             stride_toksc_n=tok_scale_n1_half.stride(0),    # Stride C is 0 for tok_scale
              stride_packed_n=packed_output_nc4.stride(0), stride_packed_c4=packed_output_nc4.stride(1),
              stride_newb_n=stride_newb_n, stride_newb_c=stride_newb_c,
              # --- Meta-parameters (Passed as constexpr) ---
@@ -834,11 +836,15 @@ def int2_quant_fastpath(
              UPDATE_CACHE=update_cache,
          )
 
+    # Prepare return values matching binary format (U(N,1), V(C,1))
+    scale_u_nk = tok_scale_n1_half # Shape (N, 1)
+    scale_v_ck = chan_scale_1c_half.view(C_COLS, 1) #  (1,C) -> (C,1)
+
     # Return values based on update_cache flag
     if update_cache:
-        return packed_output_nc4, chan_scale_1c, tok_scale_n1, new_base_output_nc
+        return packed_output_nc4, scale_u_nk, scale_v_ck, new_base_output_nc
     else:
-        return packed_output_nc4, chan_scale_1c, tok_scale_n1, None
+        return packed_output_nc4, scale_u_nk, scale_v_ck, None
 
 @triton.jit
 def _int2_dequant_fastpath(
@@ -915,33 +921,46 @@ def _int2_dequant_fastpath(
 
 @Profiler.prof_func("compact.int2_dequant_fastpath")
 def int2_dequant_fastpath(
-    packed_in_nc4: torch.Tensor,    # Input packed indices (N, C//4) uint8
-    chan_scale_1c: torch.Tensor,    # Input channel scale (1, C) float16
-    tok_scale_n1: torch.Tensor,     # Input token scale (N, 1) float16
+    packed: torch.Tensor,    # Input packed indices (N, C//4) uint8
+    scale_u_nk: torch.Tensor,       # Input scale u (N, 1) float16
+    scale_v_ck: torch.Tensor,       # Input scale v (C, 1) float16---
     base_nc: torch.Tensor,          # Input base cache (N, C) float16
 ):
     """
     Dequantizes 2-bit delta (packed along C dim) and calculates reconstructed activation (base + recv_delta).
-    Input: packed(N, C//4), chan_scale(1,C), tok_scale(N,1), base(N,C)
+    Accepts scales in binary format U(N,K), V(C,K) but expects K=1 for INT2.
+    Internally converts scales back to channel(1,C) and token(N,1) format for the kernel.
+
+    Input: packed(N, C//4), scale_u(N,1), scale_v(C,1), base(N,C)
     Output: reconstructed(N, C)
     """
     # Assertions
-    assert packed_in_nc4.dtype == torch.uint8
-    assert chan_scale_1c.dtype == torch.half and tok_scale_n1.dtype == torch.half
+    assert packed.dtype == torch.uint8
+    assert scale_u_nk.dtype == torch.half and scale_v_ck.dtype == torch.half
     assert base_nc.dtype == torch.half
-    assert packed_in_nc4.ndim == 2 and chan_scale_1c.ndim == 2 and tok_scale_n1.ndim == 2 and base_nc.ndim == 2
-    assert packed_in_nc4.is_cuda and chan_scale_1c.is_cuda and tok_scale_n1.is_cuda and base_nc.is_cuda
+    assert packed.ndim == 2 and scale_u_nk.ndim == 2 and scale_v_ck.ndim == 2 and base_nc.ndim == 2
 
-    packed_in_nc4 = packed_in_nc4.contiguous()
-    chan_scale_1c = chan_scale_1c.contiguous()
-    tok_scale_n1 = tok_scale_n1.contiguous()
+    # Check K=1 for INT2 scales
+    assert scale_u_nk.shape[1] == 1, f"INT2 expects K=1 for scale_u, got shape {scale_u_nk.shape}"
+    assert scale_v_ck.shape[1] == 1, f"INT2 expects K=1 for scale_v, got shape {scale_v_ck.shape}"
+    # Assert is_cuda removed
+    # assert packed_in_nc4.is_cuda and scale_u_nk.is_cuda and scale_v_ck.is_cuda and base_nc.is_cuda
+
+    packed = packed.contiguous()
+    scale_u_nk = scale_u_nk.contiguous()
+    scale_v_ck = scale_v_ck.contiguous()
     base_nc = base_nc.contiguous()
 
-    N_ROWS, C_COLS_4 = packed_in_nc4.shape
+    N_ROWS, C_COLS_4 = packed.shape
     C_COLS = C_COLS_4 * 4
     assert base_nc.shape == (N_ROWS, C_COLS), f"Base shape mismatch: {base_nc.shape} vs expected {(N_ROWS, C_COLS)}"
-    assert chan_scale_1c.shape == (1, C_COLS), f"Channel scale shape mismatch: {chan_scale_1c.shape} vs expected {(1, C_COLS)}"
-    assert tok_scale_n1.shape == (N_ROWS, 1), f"Token scale shape mismatch: {tok_scale_n1.shape} vs expected {(N_ROWS, 1)}"
+    assert scale_u_nk.shape == (N_ROWS, 1), f"Token scale (scale_u) shape mismatch: {scale_u_nk.shape} vs expected {(N_ROWS, 1)}"
+    assert scale_v_ck.shape == (C_COLS, 1), f"Channel scale (scale_v) shape mismatch: {scale_v_ck.shape} vs expected {(C_COLS, 1)}"
+    # --- Convert scales for the Kernel ---
+    # Kernel expects chan_scale (1, C) and tok_scale (N, 1)
+    tok_scale_n1_half = scale_u_nk # Already (N, 1)
+    chan_scale_1c_half = scale_v_ck.transpose(0, 1) # Transpose (C, 1) -> (1, C)
+    chan_scale_1c_half = chan_scale_1c_half.contiguous() # Ensure contiguous after transpose
 
     reconstructed_output_nc = torch.empty_like(base_nc)
 
@@ -951,16 +970,16 @@ def int2_dequant_fastpath(
 
     with Profiler.scope("compact._int2_dequant_fastpath"):
         _int2_dequant_fastpath[grid](
-            packed_in_nc4,
-            chan_scale_1c, tok_scale_n1, # Pass scales
+            packed,
+            chan_scale_1c_half, tok_scale_n1_half, # Pass scales in kernel's expected format
             base_nc,
             reconstructed_output_nc,
             # --- Dimensions (Passed as constexpr) ---
             N_ROWS=N_ROWS, C_COLS=C_COLS, C_COLS_4=C_COLS_4,
             # --- Strides ---
-            stride_packed_n=packed_in_nc4.stride(0), stride_packed_c4=packed_in_nc4.stride(1),
-            stride_chansc_c=chan_scale_1c.stride(1), # Stride N is 0
-            stride_toksc_n=tok_scale_n1.stride(0),   # Stride C is 0
+            stride_packed_n=packed.stride(0), stride_packed_c4=packed.stride(1),
+            stride_chansc_c=chan_scale_1c_half.stride(1), # Stride N is 0
+            stride_toksc_n=tok_scale_n1_half.stride(0),   # Stride C is 0
             stride_base_n=base_nc.stride(0), stride_base_c=base_nc.stride(1),
             stride_recon_n=reconstructed_output_nc.stride(0), stride_recon_c=reconstructed_output_nc.stride(1),
             # --- Meta-parameters (Passed as constexpr) ---
@@ -969,17 +988,19 @@ def int2_dequant_fastpath(
 
     return reconstructed_output_nc
 
-# Simulation uses slowpath dequant OR manual dequant for rank=-1
+# Simulation uses slowpath functions but needs matching interface
 def sim_int2_quant_fastpath(
     x_tensor_nc: torch.Tensor,        # Input (N, C)
     base_tensor_nc: torch.Tensor,     # Input (N, C)
     update_cache: bool,
+    rank: int = -1,                   # Add rank argument
 ):
     """
-    Simulated version of int2_quant_fastpath.
+    Simulated version of int2_quant_fastpath. Matches binary interface.
     Uses slowpath quantize_int2/dequantize_int2 internally.
-    Returns: packed(N, C//4), chan_scale(1,C), tok_scale(N,1), new_base(N,C)|None
+    Returns: packed(N, C//4), scale_u(N,1), scale_v(C,1), new_base(N,C)|None
     """
+    assert rank == -1, "Simulation for INT2 fastpath only supports rank=-1 equivalent" # Enforce rank=-1
     N, C = x_tensor_nc.shape
     new_base_nc = None
 
@@ -1000,30 +1021,39 @@ def sim_int2_quant_fastpath(
         # Calculate new base
         new_base_nc = base_tensor_nc + recv_delta_sim_nc
 
+    # Prepare return values matching binary format (U(N,1), V(C,1))
+    scale_u_nk_sim = tok_scale_sim_n1.to(torch.half) # Already (N, 1), ensure half
+    scale_v_ck_sim = chan_scale_sim_1c.T.to(torch.half) # Transpose (1,C) -> (C,1), ensure half
+
     # Return values matching fastpath signature
-    return packed_sim_nc4, chan_scale_sim_1c, tok_scale_sim_n1, new_base_nc
+    return packed_sim_nc4, scale_u_nk_sim, scale_v_ck_sim, new_base_nc
 
 def sim_int2_dequant_fastpath(
     packed_in_nc4: torch.Tensor,    # Input packed indices (N, C//4) uint8
-    chan_scale_1c: torch.Tensor,    # Input channel scale (1, C) float16
-    tok_scale_n1: torch.Tensor,     # Input token scale (N, 1) float16
+    scale_u_nk: torch.Tensor,       # Input scale u (N, 1) float16
+    scale_v_ck: torch.Tensor,       # Input scale v (C, 1) float16
     base_nc: torch.Tensor,          # Input base cache (N, C) float16
 ):
     """
-    Simulated version of int2_dequant_fastpath.
+    Simulated version of int2_dequant_fastpath. Matches binary interface.
     Uses the slowpath dequantize_int2 function internally.
-    Input: packed(N, C//4), chan_scale(1,C), tok_scale(N,1), base(N,C)
+    Input: packed(N, C//4), scale_u(N,1), scale_v(C,1), base(N,C)
     Returns: reconstructed(N,C)
     """
     N, C4 = packed_in_nc4.shape
     C = C4 * 4
-    assert chan_scale_1c.shape == (1, C)
-    assert tok_scale_n1.shape == (N, 1)
+    assert scale_u_nk.shape == (N, 1), f"Sim expects scale_u shape {(N, 1)}, got {scale_u_nk.shape}"
+    assert scale_v_ck.shape == (C, 1), f"Sim expects scale_v shape {(C, 1)}, got {scale_v_ck.shape}"
     assert base_nc.shape == (N, C)
+
+    # --- Convert scales back for slowpath dequantize_int2 ---
+    # slowpath expects chan_scale (1, C) and tok_scale (N, 1)
+    tok_scale_n1_sim = scale_u_nk # Already (N, 1)
+    chan_scale_1c_sim = scale_v_ck.T # Transpose (C, 1) -> (1, C)
 
     # --- Always use the slowpath dequantize_int2 for simulation consistency --- 
     with Profiler.scope("compact.sim_dequant.slowpath_dequantize_int2"):
-        recv_delta_nc = dequantize_int2(packed_in_nc4, chan_scale_1c, tok_scale_n1)
+        recv_delta_nc = dequantize_int2(packed_in_nc4, chan_scale_1c_sim, tok_scale_n1_sim)
         reconstructed_nc = base_nc + recv_delta_nc
 
     # Return only reconstructed
@@ -1220,20 +1250,20 @@ def profile_int2_quant_kernels(num_runs=1000, num_warmup=5):
     x_tensor_nc = (torch.randn((N_TOKENS, CHANNEL), dtype=torch.half, device="cuda") * 0.5).contiguous()
     base_tensor_nc = (torch.randn_like(x_tensor_nc) * 0.1).contiguous()
 
-    # Sim args (update_cache = True for full test)
-    sim_args = (x_tensor_nc, base_tensor_nc, True)
+    # Sim args (update_cache = True for full test, rank = -1 is implicit now in signature)
+    sim_args = (x_tensor_nc, base_tensor_nc, True) 
 
     # --- Calculate Reference Values (Simulation) ---
     with torch.random.fork_rng(devices=['cuda']):
         torch.manual_seed(42)
-        # Returns: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), new_base(N,C)
-        ref_packed, ref_chan_scale, ref_tok_scale, ref_new_base = sim_int2_quant_fastpath(*sim_args)
+        # Returns: packed(N,C//4), scale_u(N,1), scale_v(C,1), new_base(N,C)
+        ref_packed, ref_scale_u, ref_scale_v, ref_new_base = sim_int2_quant_fastpath(*sim_args)
 
     # --- Warm-up runs --- 
     for _ in range(num_warmup):
         with torch.random.fork_rng(devices=['cuda']):
             torch.manual_seed(42)
-            # Call fastpath with N,C tensors
+            # Call fastpath with N,C tensors (rank=-1 implicit)
             _ = int2_quant_fastpath(x_tensor_nc, base_tensor_nc, update_cache=True)
             _ = sim_int2_quant_fastpath(*sim_args)
         torch.cuda.synchronize()
@@ -1241,8 +1271,8 @@ def profile_int2_quant_kernels(num_runs=1000, num_warmup=5):
     # --- Get Kernel results for correctness check --- 
     with torch.random.fork_rng(devices=['cuda']):
         torch.manual_seed(42)
-        # Returns: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), new_base(N,C)
-        kernel_packed, kernel_chan_scale, kernel_tok_scale, kernel_new_base = int2_quant_fastpath(
+        # Returns: packed(N,C//4), scale_u(N,1), scale_v(C,1), new_base(N,C)
+        kernel_packed, kernel_scale_u, kernel_scale_v, kernel_new_base = int2_quant_fastpath(
             x_tensor_nc, base_tensor_nc, update_cache=True
         )
     torch.cuda.synchronize()
@@ -1254,7 +1284,8 @@ def profile_int2_quant_kernels(num_runs=1000, num_warmup=5):
         update_c = (i % 2 == 0) # Test both update paths
         with torch.random.fork_rng(devices=['cuda']):
             torch.manual_seed(42 + i) # Vary seed slightly
-            _ = int2_quant_fastpath(x_tensor_nc, base_tensor_nc, update_cache=update_c)
+            # rank=-1 implicit
+            _ = int2_quant_fastpath(x_tensor_nc, base_tensor_nc, update_cache=update_c) 
     torch.cuda.synchronize()
     end_kernel = time.time()
     kernel_time = (end_kernel - start_kernel) / num_runs
@@ -1270,14 +1301,14 @@ def profile_int2_quant_kernels(num_runs=1000, num_warmup=5):
     packed_equality_ratio = equal_packed_count / total_packed_elements
     if packed_equality_ratio < 0.98:
         correct = False; issues.append(f"Packed (Equality Ratio: {packed_equality_ratio:.4f} < 0.98)")
-    # Chan Scale (1, C)
+    # Scale U (N, 1) - Corresponds to original tok_scale
     try:
-        check_tensor_approx(ref_chan_scale, kernel_chan_scale, tol=INT2_FASTPATH_TOL, desc="Chan Scale")
+        check_tensor_approx(ref_scale_u, kernel_scale_u, tol=INT2_FASTPATH_TOL, desc="Scale U (Token Scale)")
     except AssertionError as e:
         correct = False; issues.append(str(e))
-    # Tok Scale (N, 1)
+    # Scale V (C, 1) - Corresponds to original chan_scale.T
     try:
-        check_tensor_approx(ref_tok_scale, kernel_tok_scale, tol=INT2_FASTPATH_TOL, desc="Tok Scale")
+        check_tensor_approx(ref_scale_v, kernel_scale_v, tol=INT2_FASTPATH_TOL, desc="Scale V (Channel Scale)")
     except AssertionError as e:
         correct = False; issues.append(str(e))
     # New Base (N, C)
@@ -1290,7 +1321,7 @@ def profile_int2_quant_kernels(num_runs=1000, num_warmup=5):
         correct = False; issues.append("New Base (Mismatch None/Not None)")
 
     print(f"Correctness vs Sim (INT2 Quant, Update Cache=True): {correct}")
-    if not correct: print(f"  Issues: {', '.join(issues)}\n")
+    if not correct: print(f"  Issues: {', '.join(issues)}\\n")
 
     print("---")
 
@@ -1307,15 +1338,16 @@ def profile_int2_dequant_kernels(num_runs=1000, num_warmup=5):
     base_nc = (torch.randn_like(x_tensor_nc) * 0.1).contiguous()
 
     # --- Generate Inputs using Quant Sim (no cache update needed here) ---
-    quant_sim_args = (x_tensor_nc, base_nc, False) # update_cache = False
+    # rank=-1 implicit
+    quant_sim_args = (x_tensor_nc, base_nc, False) 
     with torch.random.fork_rng(devices=['cuda']):
         torch.manual_seed(42)
-        # Quant sim returns: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), _
-        input_packed_nc4, input_chan_scale, input_tok_scale, _ = sim_int2_quant_fastpath(*quant_sim_args)
+        # Quant sim returns: packed(N,C//4), scale_u(N,1), scale_v(C,1), _
+        input_packed_nc4, input_scale_u, input_scale_v, _ = sim_int2_quant_fastpath(*quant_sim_args)
 
     # --- Calculate Reference Outputs (Dequant Simulation) ---
-    # Dequant sim args: packed(N,C//4), chan_scale(1,C), tok_scale(N,1), base(N,C)
-    dequant_sim_args = (input_packed_nc4, input_chan_scale, input_tok_scale, base_nc)
+    # Dequant sim args: packed(N,C//4), scale_u(N,1), scale_v(C,1), base(N,C)
+    dequant_sim_args = (input_packed_nc4, input_scale_u, input_scale_v, base_nc)
     with torch.random.fork_rng(devices=['cuda']):
          torch.manual_seed(43) # Use different seed
          ref_reconstructed_nc = sim_int2_dequant_fastpath(*dequant_sim_args)

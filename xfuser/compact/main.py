@@ -12,6 +12,7 @@ import os
 from xfuser.compact.slowpath import slowpath_compress, slowpath_decompress, sim_compress
 from xfuser.compact.patchpara.df_cache import AllGatherCache
 from xfuser.compact.utils import ALLOW_DEPRECATED
+from xfuser.compact.fastpath import binary_quant_fastpath, binary_dequant_fastpath, int2_quant_fastpath, int2_dequant_fastpath
 
 """
 COMPACT: Activation Compression with Delta Transmission and Error Feedback
@@ -124,6 +125,47 @@ def _decompress_fn(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, shape:
         return x.view(shape)  # no need for further decompression
     return slowpath_decompress(x, shape, compress_type, rank=rank, sparse_ratio=_config.sparse_ratio)
 
+def _compact_compress_fastpath(cache_key, x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, update_cache: bool, rank: int):
+    assert compress_type == COMPACT_COMPRESS_TYPE.BINARY or compress_type == COMPACT_COMPRESS_TYPE.INT2
+    assert _config.compress_residual == 1
+    # Base should be (N, C) now
+    base = _cache.get_base(cache_key) 
+    
+    fastpath_func = binary_quant_fastpath if compress_type == COMPACT_COMPRESS_TYPE.BINARY else int2_quant_fastpath
+    # Call with N, C layout
+    q, scale_u_nk, scale_v_ck, new_base = fastpath_func(
+        x_tensor_nc=x,
+        base_tensor_nc=base,
+        rank=rank,
+        update_cache=update_cache,
+    )
+    # q: (N, C//8), scale_u_nk: (N, K), scale_v_ck: (C, K), new_base: (N, C)
+    if update_cache:
+        # new_base is already N, C
+        _cache.put(cache_key, new_base, None)
+
+    q_flat_half = q.view(torch.half).flatten()
+    u_flat_half = scale_u_nk.flatten() # New: U is (N, K)
+    v_flat_half = scale_v_ck.flatten() # New: V is (C, K)
+    compressed = torch.cat([q_flat_half, u_flat_half, v_flat_half], dim=0)
+
+    if _config.log_compress_stats:
+        log_base = base # Already N, C
+        log_recv_activation = new_base # Already N, C
+        stats_log().log(
+            cache_key,
+            log_base,
+            None,
+            x,
+            log_recv_activation,
+            compressed,
+            1,
+            ref_activation_path=_config.ref_activation_path,
+            dump_activations=_config.dump_activations,
+            calc_total_error=_config.calc_total_error
+        )
+    return compressed
+
 @Profiler.prof_func("compact.compact_compress")
 def compact_compress(
     cache_key,
@@ -168,43 +210,7 @@ def compact_compress(
         return x.view(original_shape)
     else:
         if _config.fastpath:
-            assert compress_type == COMPACT_COMPRESS_TYPE.BINARY
-            assert _config.compress_residual == 1
-            from xfuser.compact.fastpath import binary_quant_fastpath
-            # Base should be (N, C) now
-            base = _cache.get_base(cache_key) 
-            # Call with N, C layout
-            q, scale_u_ck, scale_v_kn, new_base = binary_quant_fastpath(
-                x_tensor_nc=x,
-                base_tensor_nc=base,
-                rank=rank,
-                update_cache=update_cache,
-            )
-            # q: (N, C//8), scale_u_nk: (N, K), scale_v_ck: (C, K), new_base: (N, C)
-            if update_cache:
-                # new_base is already N, C
-                _cache.put(cache_key, new_base, None)
-
-            q_flat_half = q.view(torch.half).flatten()
-            u_flat_half = scale_u_ck.flatten() # New: U is (N, K)
-            v_flat_half = scale_v_kn.flatten() # New: V is (C, K)
-            compressed = torch.cat([q_flat_half, u_flat_half, v_flat_half], dim=0)
-
-            if _config.log_compress_stats:
-                log_base = base # Already N, C
-                log_recv_activation = new_base # Already N, C
-                stats_log().log(
-                    cache_key,
-                    log_base,
-                    None,
-                    x,
-                    log_recv_activation,
-                    compressed,
-                    1,
-                    ref_activation_path=_config.ref_activation_path,
-                    dump_activations=_config.dump_activations,
-                    calc_total_error=_config.calc_total_error
-                )
+            compressed = _compact_compress_fastpath(cache_key, x, compress_type, update_cache, rank)
         else:
             if _config.compress_residual == 0:
                 compressed = _compress_fn(x, compress_type, rank)
@@ -276,6 +282,52 @@ def compact_compress(
 def _decay_delta_base(delta_base):
     return delta_base * _config.delta_decay_factor
 
+
+def _compact_decompress_fastpath(cache_key, compressed: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, shape: tuple, update_cache: bool, rank: int):
+    assert compress_type in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2]
+    assert _config.compress_residual == 1
+
+    N, C = shape # Shape is N, C after initial reshape
+    assert C % (8 if compress_type == COMPACT_COMPRESS_TYPE.BINARY else 4) == 0, "Channel dim C must be divisible"
+
+    ITEM_PER_BYTE = 8 if compress_type == COMPACT_COMPRESS_TYPE.BINARY else 4
+    
+    # Calculate split sizes for packed(N,C//8 uint8), scale_u(N,K half), scale_v(C,K half)
+    q_numel_uint8 = N * (C // ITEM_PER_BYTE)
+    q_numel_half = q_numel_uint8 // 2 # Stored as FP16 view
+    u_numel_half = N * rank             # U is (N, K)
+    v_numel_half = C * rank             # V is (C, K)
+
+    expected_numel = q_numel_half + u_numel_half + v_numel_half
+    assert compressed.numel() == expected_numel, \
+        f"Mismatch in compressed tensor size: expected {expected_numel} (q={q_numel_half}, u={u_numel_half}, v={v_numel_half}), got {compressed.numel()}, Shape (N,C)=({N},{C}), Rank={rank}"
+
+    # Split the compressed tensor
+    q_half, scale_u_flat, scale_v_flat = torch.split(
+        compressed,
+        [q_numel_half, u_numel_half, v_numel_half]
+    )
+
+    # Reshape
+    packed_ncx = q_half.view(torch.uint8).view(N, C // ITEM_PER_BYTE)
+    scale_u_nk = scale_u_flat.view(N, rank)
+    scale_v_ck = scale_v_flat.view(C, rank)
+
+    base_nc = _cache.get_base(cache_key)
+
+    fastpath_func = binary_dequant_fastpath if compress_type == COMPACT_COMPRESS_TYPE.BINARY else int2_dequant_fastpath
+    # Updated function call signature and return value
+    reconstructed_nc = fastpath_func(
+        packed=packed_ncx,
+        scale_u_nk=scale_u_nk,
+        scale_v_ck=scale_v_ck,
+        base_nc=base_nc,
+    )
+    # reconstructed_nc is (N, C)
+    if update_cache:
+        _cache.put(cache_key, reconstructed_nc, None)
+    return reconstructed_nc # Already (N, C)
+
 @Profiler.prof_func("compact.compact_decompress")
 def compact_decompress(
     cache_key,
@@ -324,48 +376,7 @@ def compact_decompress(
         return val.view(original_shape)
     else:
         if _config.fastpath:
-            assert compress_type == COMPACT_COMPRESS_TYPE.BINARY, "Fastpath only supports BINARY compress type"
-            assert _config.compress_residual == 1
-            from xfuser.compact.fastpath import binary_dequant_fastpath
-
-            N, C = shape # Shape is N, C after initial reshape
-            assert C % 8 == 0, "Channel dim C must be divisible by 8 for binary fastpath"
-
-            # Calculate split sizes for packed(N,C//8 uint8), scale_u(N,K half), scale_v(C,K half)
-            q_numel_uint8 = N * (C // 8)
-            q_numel_half = q_numel_uint8 // 2 # Stored as FP16 view
-            u_numel_half = N * rank             # U is (N, K)
-            v_numel_half = C * rank             # V is (C, K)
-
-            expected_numel = q_numel_half + u_numel_half + v_numel_half
-            assert compressed.numel() == expected_numel, \
-                f"Mismatch in compressed tensor size: expected {expected_numel} (q={q_numel_half}, u={u_numel_half}, v={v_numel_half}), got {compressed.numel()}, Shape (N,C)=({N},{C}), Rank={rank}"
-
-            # Split the compressed tensor
-            q_half, scale_u_flat, scale_v_flat = torch.split(
-                compressed,
-                [q_numel_half, u_numel_half, v_numel_half]
-            )
-
-            # Reshape
-            packed_nc8 = q_half.view(torch.uint8).view(N, C // 8)
-            scale_u_nk = scale_u_flat.view(N, rank)
-            scale_v_ck = scale_v_flat.view(C, rank)
-
-            base_nc = _cache.get_base(cache_key)
-
-            # Updated function call signature and return value
-            reconstructed_nc = binary_dequant_fastpath(
-                packed_in_nc8=packed_nc8,
-                scale_u_nk=scale_u_nk,
-                scale_v_ck=scale_v_ck,
-                base_nc=base_nc,
-                # rank=rank,
-            )
-            # reconstructed_nc is (N, C)
-            if update_cache:
-                _cache.put(cache_key, reconstructed_nc, None)
-            reconstructed = reconstructed_nc # Already (N, C)
+            reconstructed = _compact_decompress_fastpath(cache_key, compressed, compress_type, shape, update_cache, rank)
         else:
             if _config.compress_residual == 0:
                 reconstructed = _decompress_fn(compressed, compress_type, shape, rank)

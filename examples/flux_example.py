@@ -36,24 +36,24 @@ def customized_compact_config():
     prepared_patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
-        async_warmup=2,
+        async_warmup=1,
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK_Q
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.INT2
     compact_config = CompactConfig(
         enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
         compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-        comp_rank=32 if not COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY else -1,
+        comp_rank=32 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
         log_stats=False,
         check_consist=False,
-        fastpath=False and COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY,
+        fastpath=True and COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2],
         ref_activation_path='ref_activations',
         dump_activations=False,
         calc_total_error=False,
@@ -83,8 +83,8 @@ def main():
     """
     from xfuser.compact.main import compact_init, compact_reset, compact_hello
     from examples.configs import get_config
-    compact_config = get_config("flux", "lowrank")
-    # compact_config = customized_compact_config()
+    # compact_config = get_config("flux", "lowrank")
+    compact_config = customized_compact_config()
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -137,7 +137,7 @@ def main():
         LOOP_COUNT = 1
 
     profiler = Profiler().instance()
-    profiler.disable()
+    # profiler.disable()
     for i in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
@@ -159,16 +159,18 @@ def main():
         # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
-        Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
-        # if local_rank == 0:
-        #     stats_verbose()
-            # prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            # print(str.join("\n", prof_result))
+        
+        if local_rank == 0:
+            # pass
+            stats_verbose()
+            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            print(str.join("\n", prof_result))
             # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # save_eigenvalues(save_dir="./results/eigenvalues")
-            
+        # NOTE: sync() should be called after summary()
+        Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
     parallel_info = (
         f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"
         f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"
