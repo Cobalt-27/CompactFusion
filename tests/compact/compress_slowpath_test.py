@@ -10,6 +10,9 @@ from xfuser.compact.compress_quantize import (
     quantize_1bit,
     dequantize_1bit,
     sim_binary,
+    quantize_int4,
+    dequantize_int4,
+    sim_int4,
 )
 from xfuser.compact.compress_lowrank import svd, subspace_iter
 from xfuser.compact.compress_topk import SPARSE_LAST_DIM_SIZE
@@ -200,6 +203,34 @@ def test_subspace_iter(n, hidden, seed, target_rank):
             tol=tolerance,
             desc=f"Rank={target_rank}"
         )
+
+@pytest.mark.parametrize(
+    "A,B", [(1024, 2048), (512, 4096), (256, 8192)] # A must be even for N-dim packing
+)  # Large tensor sizes
+@pytest.mark.parametrize("seed", [42, 43, 44])
+def test_int4_quantization(
+    A, B, seed
+):
+    """Test INT4 quantization and dequantization against simulation."""
+    for i in range(LOOP_CNT):
+        loop_seed = seed + i
+        torch.manual_seed(loop_seed)
+        input_tensor = torch.randn((A, B), dtype=torch.half, device="cuda")
+        original_shape = input_tensor.shape
+        
+        # Simulate INT4 quantization (using dim=0 for scaling as in the actual function)
+        # Note: sim_int4 returns the dequantized tensor directly
+        quantized_simulated = sim_int4(input_tensor, dim=0)
+        
+        # Perform actual INT4 quantization/dequantization
+        packed_tensor, scale, min_val = quantize_int4(input_tensor)
+        
+        # Dequantize using the results from the actual quantization
+        decompressed_tensor = dequantize_int4(packed_tensor, scale, min_val, original_shape)
+        
+        # Compare actual decompressed with simulated
+        # Use a slightly looser tolerance for quantization approximation
+        assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=0.05, desc="INT4 Quantization")
 
 # Run tests
 if __name__ == "__main__":

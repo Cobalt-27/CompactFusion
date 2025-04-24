@@ -11,7 +11,7 @@ def svd(input_tensor: torch.Tensor, rank: int):
     Vh = Vh[:rank, :]
     return (U @ S_diag).to(input_tensor.dtype), Vh.to(input_tensor.dtype)
 
-@torch.jit.script
+@torch.compile
 def subspace_iter(
     A: torch.Tensor, rank: int, num_iters: int = 10, init_q: torch.Tensor | None = None
 ):

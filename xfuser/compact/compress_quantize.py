@@ -378,7 +378,7 @@ def sim_int2(input_tensor: torch.Tensor, scale: torch.Tensor = None) -> torch.Te
     dequantized_tensor = output.to(input_dtype)
     return dequantized_tensor
 
-@torch.jit.script
+@torch.compile
 def quantize_int8(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Performs channel-wise INT8 affine quantization on a 2D input tensor.
@@ -423,7 +423,7 @@ def quantize_int8(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     assert zero_point.dtype == torch.int16
     return quantized_tensor, scale, zero_point
 
-@torch.jit.script
+@torch.compile
 def dequantize_int8(q_tensor, scale, zero_point):
      # Ensure scale/zp are broadcastable if they were squeezed
      if q_tensor.dim() > scale.dim():
@@ -439,47 +439,143 @@ def dequantize_int8(q_tensor, scale, zero_point):
 
 def sim_int4(input_tensor: torch.Tensor, dim) -> torch.Tensor:
     """
-    Simulates channel-wise INT4 quantization with zero-centered, min-max-based scaling.
+    Simulates channel-wise INT4 quantization with min-max-based scaling,
+    matching the logic of quantize_int4 for comparison.
+    Scaling is performed along the specified dim.
     """
     assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
-    # assert input_tensor.dtype == torch.half, "Input tensor must be FP16"
-    dtype = input_tensor.dtype
-    input_float32 = input_tensor.float()
-    val_max = torch.max(input_float32, dim=dim, keepdim=True)[0]
-    val_min = torch.min(input_float32, dim=dim, keepdim=True)[0]
-    scale = (val_max - val_min) / 15
-    scale = torch.where(scale > 1e-8, scale, torch.ones_like(scale) * 1e-8)
-    zero_point_offset = torch.round(val_min / scale)
+    # Keep original dtype, expected to be float16
+    dtype = input_tensor.dtype 
 
-    # Quantize
-    quantized_vals = torch.round((input_float32 - val_min) / scale)
-    # Clamp to [0, 15] range first
-    quantized_vals = torch.clamp(quantized_vals, min=0, max=15)
-    # Shift to represent [-8, 7] if needed, but let's keep it [0, 15] for simplicity of dequant
-    # Store as int8 as there's no int4 type
-    dequantized_vals = quantized_vals * scale + val_min
-    return dequantized_vals.to(dtype) # Return in original dtype
+    # Calculate min/max along the specified dimension using input dtype
+    val_max = torch.max(input_tensor, dim=dim, keepdim=True)[0]
+    val_min = torch.min(input_tensor, dim=dim, keepdim=True)[0]
+    
+    # Calculate scale using the same formula and epsilon as quantize_int4
+    # qmax = 15, qmin = 0
+    scale = (val_max - val_min) / (15 + 1e-6)
+    val_min = val_min.to(dtype)
+    scale = scale.to(dtype)
 
+    # Quantize: q = round((r - min_val) / scale)
+    # Perform calculations in the original dtype
+    quantized_vals_float = torch.round((input_tensor - val_min) / scale)
+    
+    # Clamp to [0, 15] range
+    quantized_vals = torch.clamp(quantized_vals_float, min=0, max=15)
 
-def sim_int2_minmax(input_tensor: torch.Tensor, dim) -> torch.Tensor:
+    # Dequantize: r = q * scale + min_val
+    # Perform dequantization calculation in the original dtype
+    # Note: We use the clamped quantized_vals here, not the intermediate float
+    dequantized_vals = quantized_vals.to(dtype) * scale.to(dtype) + val_min.to(dtype)
+    
+    # Return in original dtype
+    return dequantized_vals
+
+@torch.compile
+def quantize_int4(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Simulates channel-wise INT2 quantization with min-max-based scaling.
+    Performs channel-wise INT4 affine quantization (0 to 15) on a 2D input tensor.
+    Scaling (min/max) is calculated along dim=0 (N dimension).
+    Packs two 4-bit values along the N dimension into a single INT8 byte.
+
+    Args:
+        input_tensor: A 2D PyTorch tensor (shape [N, C]) of dtype float16.
+                      N must be even.
+
+    Returns:
+        A tuple containing:
+        - packed_quantized_tensor: The packed quantized tensor of dtype torch.uint8, shape (N/2, C).
+        - scale: The scale factor tensor (one per channel C), shape (1, C), dtype float16.
+        - min_val: The minimum value tensor (one per channel C), shape (1, C), dtype float16.
     """
     assert input_tensor.dim() == 2, f"Input tensor must be 2D, but got {input_tensor.dim()} dimensions."
-    # assert input_tensor.dtype == torch.half, "Input tensor must be FP16"
-    dtype = input_tensor.dtype
-    input_float32 = input_tensor.float()
-    val_max = torch.max(input_float32, dim=dim, keepdim=True)[0]
-    val_min = torch.min(input_float32, dim=dim, keepdim=True)[0]
-    scale = (val_max - val_min) / 3
-    scale = torch.where(scale > 1e-8, scale, torch.ones_like(scale) * 1e-8)
-    zero_point_offset = torch.round(val_min / scale)
+    assert input_tensor.dtype == torch.half, "Input tensor must be FP16"
+    N, C = input_tensor.shape
+    assert N % 2 == 0, f"Dimension N (0) size must be even for INT4 packing, got {N}"
 
-    # Quantize
-    quantized_vals = torch.round((input_float32 - val_min) / scale)
-    # Clamp to [0, 3] range first
-    quantized_vals = torch.clamp(quantized_vals, min=0, max=3)
-    # Shift to represent [-2, 1] if needed, but let's keep it [0, 3] for simplicity of dequant
-    # Store as int8 as there's no int4 type
-    dequantized_vals = quantized_vals * scale + val_min
-    return dequantized_vals.to(dtype) # Return in original dtype
+    qmin_int4 = 0
+    qmax_int4 = 15
+    
+    # Calculate min/max along dim=0 (N dimension)
+    min_val = torch.min(input_tensor, dim=0, keepdim=True).values # Shape (1, C)
+    max_val = torch.max(input_tensor, dim=0, keepdim=True).values # Shape (1, C)
+
+    # Calculate scale (per channel C)
+    scale = (max_val - min_val) / (qmax_int4 - qmin_int4 + 1e-6) # Add epsilon for stability
+    scale = scale.to(torch.half)
+    min_val = min_val.to(torch.half) # Ensure min_val is also half
+
+    # Quantize: q = round((r - min_val) / scale)
+    quantized_data_float = torch.round((input_tensor - min_val) / scale)
+
+    # Clamp the quantized values to the int4 range [0, 15]
+    quantized_data_clamped = torch.clamp(quantized_data_float, qmin_int4, qmax_int4).to(torch.uint8) # Shape (N, C)
+
+    # Pack two 4-bit values along N dimension into one uint8 byte
+    # Reshape (N, C) -> (N/2, 2, C)
+    quantized_data_clamped = quantized_data_clamped.view(N // 2, 2, C)
+    val1 = quantized_data_clamped[:, 0, :] # Shape (N/2, C)
+    val2 = quantized_data_clamped[:, 1, :] # Shape (N/2, C)
+
+    # Pack: lower 4 bits = val1, upper 4 bits = val2
+    packed_quantized_tensor = (val1 & 0x0F) | ((val2 & 0x0F) << 4) # Shape (N/2, C)
+    packed_quantized_tensor = packed_quantized_tensor.contiguous() # Ensure contiguity
+
+    assert packed_quantized_tensor.dtype == torch.uint8
+    assert packed_quantized_tensor.shape == (N // 2, C)
+    assert scale.dtype == torch.half
+    assert scale.shape == (1, C)
+    assert min_val.dtype == torch.half
+    assert min_val.shape == (1, C)
+
+    return packed_quantized_tensor, scale, min_val
+
+@torch.compile
+def dequantize_int4(
+    packed_tensor: torch.Tensor, # Shape (N/2, C)
+    scale: torch.Tensor,         # Shape (1, C)
+    min_val: torch.Tensor,       # Shape (1, C)
+    output_shape: tuple        # Original shape (N, C)
+) -> torch.Tensor:
+    """
+    Dequantizes a packed INT4 tensor (stored as uint8) back to float16.
+    Assumes scaling was done along dim=0 (N) and packing was done along dim=0 (N).
+
+    Args:
+        packed_tensor: The packed quantized tensor (dtype torch.uint8), shape (N/2, C).
+        scale: The scale factor tensor (dtype float16), shape (1, C).
+        min_val: The minimum value tensor (dtype float16), shape (1, C).
+        output_shape: The original shape of the tensor before quantization (N, C).
+                      N must be even.
+
+    Returns:
+        The dequantized tensor (dtype torch.half), shape (N, C).
+    """
+    assert packed_tensor.dtype == torch.uint8, "Packed tensor must be UINT8"
+    assert scale.dtype == torch.half, "Scale must be FP16"
+    assert min_val.dtype == torch.half, "min_val must be FP16"
+    assert len(output_shape) == 2, "Currently only support 2D output shapes"
+    N, C = output_shape
+    assert N % 2 == 0, f"Original dimension N (0) size must be even for INT4 unpacking, got {N}"
+    assert packed_tensor.shape == (N // 2, C), f"Packed tensor shape mismatch. Expected {(N // 2, C)}, got {packed_tensor.shape}"
+    assert scale.shape == (1, C), f"Scale shape mismatch. Expected {(1, C)}, got {scale.shape}"
+    assert min_val.shape == (1, C), f"Min_val shape mismatch. Expected {(1, C)}, got {min_val.shape}"
+
+    # Unpack uint8 into two uint8 tensors representing 4-bit values
+    val1 = (packed_tensor & 0x0F).to(torch.uint8) # Lower 4 bits, Shape (N/2, C)
+    val2 = ((packed_tensor >> 4) & 0x0F).to(torch.uint8) # Upper 4 bits, Shape (N/2, C)
+
+    # Interleave the unpacked values back to the original shape (N, C)
+    unpacked_quantized = torch.empty(output_shape, dtype=torch.uint8, device=packed_tensor.device)
+    unpacked_quantized[0::2, :] = val1 # Even rows
+    unpacked_quantized[1::2, :] = val2 # Odd rows
+
+    # Dequantize: r = q * scale + min_val
+    # scale and min_val have shape (1, C), they will broadcast correctly
+    dequantized_tensor = unpacked_quantized.to(torch.half) * scale + min_val
+
+    assert dequantized_tensor.shape == output_shape
+    assert dequantized_tensor.dtype == torch.half
+    return dequantized_tensor
+
