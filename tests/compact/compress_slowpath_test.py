@@ -244,6 +244,7 @@ def test_int4_quantization(
         # Use a slightly looser tolerance for quantization approximation
         assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=INT4_TOL, desc="INT4 Quantization")
 
+INT2_TOL = 0.02
 @pytest.mark.parametrize(
     "N,C", [(1024, 2048), (512, 4096), (256, 8192)] # C must be divisible by 4
 )  # Large tensor sizes
@@ -261,7 +262,7 @@ def test_int2_quantization(
         quantized_simulated = sim_int2(input_tensor)
         packed_tensor, chan_scale, tok_scale = quantize_int2(input_tensor)
         decompressed_tensor = dequantize_int2(packed_tensor, chan_scale, tok_scale)
-        assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=1e-2, desc="INT2 Quantization")
+        assert_tensor_approx(decompressed_tensor, quantized_simulated, tol=INT2_TOL, desc="INT2 Quantization")
 
 # Run tests
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from xfuser.compact.compress_quantize import (
     sim_int4,
     quantize_int4,
     dequantize_int4,
+    sim_int2_minmax,
 )
 from xfuser.compact.compress_lowrank import (
     subspace_iter,
@@ -199,6 +200,8 @@ def sim_compress(x: torch.Tensor, compress_type: COMPACT_COMPRESS_TYPE, sparse_r
         return quant_x.half()
     elif compress_type == COMPACT_COMPRESS_TYPE.INT2:
         return sim_int2(x)
+    elif compress_type == COMPACT_COMPRESS_TYPE.INT2_MINMAX:
+        return sim_int2_minmax(x)
     elif compress_type == COMPACT_COMPRESS_TYPE.INT4:
         return sim_int4(x, dim=0)
     elif compress_type == COMPACT_COMPRESS_TYPE.LOW_RANK:

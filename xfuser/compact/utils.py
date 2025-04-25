@@ -20,6 +20,7 @@ class COMPACT_COMPRESS_TYPE(Enum):
     SPARSE = "sparse"
     BINARY = "binary"
     INT2 = "int2"
+    INT2_MINMAX = "int2-minmax"
     INT4 = "int4"
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
     LOW_RANK = "low-rank"

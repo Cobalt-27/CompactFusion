@@ -10,11 +10,6 @@ from xfuser.compact.compress_quantize import (
 from xfuser.compact.compress_lowrank import subspace_iter
 
 @triton.jit
-def _bitwise_or(a, b):
-    """ Helper for Triton reduce """
-    return a | b
-
-@triton.jit
 def _binary_quant_fastpath(
     # Input Pointers (Layout N, C)
     x_ptr,             # Current activation (N, C)
@@ -72,9 +67,9 @@ def _binary_quant_fastpath(
     # Create shifts [0, 1, ..., 7]
     shifts = tl.arange(0, 8).to(tl.uint8)
     
-    # Shift and reduce (bitwise OR) to pack 8 bits into uint8
+    # Shift and sum (equivalent to bitwise OR for non-overlapping bits) to pack 8 bits into uint8
     shifted = (binary_reshaped << shifts).to(tl.uint8) # (BLOCK_SIZE_C//8, 8)
-    packed_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8) # (BLOCK_SIZE_C//8,)
+    packed_block = tl.sum(shifted, axis=1).to(tl.uint8) # (BLOCK_SIZE_C//8,)
 
     # --- Store Packed Block --- 
     # Calculate offsets in the packed dimension C//8
@@ -551,7 +546,7 @@ def _int2_quant_fastpath(
     indices_reshaped = tl.reshape(indices, (BLOCK_SIZE_C // 4, 4))
     shifts = tl.arange(0, 4).to(tl.uint8) * 2 # [0, 2, 4, 6]
     shifted = (indices_reshaped << shifts).to(tl.uint8)
-    packed_block = tl.reduce(shifted, axis=1, combine_fn=_bitwise_or).to(tl.uint8)
+    packed_block = tl.sum(shifted, axis=1).to(tl.uint8)
 
     # --- Store Packed Block ---
     c4_block_start = c_block_start // 4
@@ -617,16 +612,17 @@ def int2_quant_fastpath(
 
     # --- Scale Calculation (Based on Delta, matches quantize_int2) ---
     with Profiler.scope("compact.quant.calc_scale_int2"):
-        delta_float32 = (x_tensor_nc - base_tensor_nc).float() # Delta in float32 for calc
-        abs_delta = torch.abs(delta_float32)
-        chan_scale_1c = torch.mean(abs_delta, dim=0, keepdim=True) # Shape (1, C)
-        tok_scale_n1 = torch.mean(abs_delta, dim=1, keepdim=True)  # Shape (N, 1)
+        # Calculate delta directly in half precision
+        delta_half = x_tensor_nc - base_tensor_nc 
+        abs_delta = torch.abs(delta_half) # Now working with half precision
+        chan_scale_1c = torch.mean(abs_delta, dim=0, keepdim=True) # Shape (1, C), half
+        tok_scale_n1 = torch.mean(abs_delta, dim=1, keepdim=True)  # Shape (N, 1), half
         # Normalize tok_scale
         tok_mean = tok_scale_n1.mean()
         tok_scale_n1 = tok_scale_n1 / (tok_mean + 1e-6)
-        # Keep scales in float16 for kernel
-        chan_scale_1c_half = chan_scale_1c.to(torch.half).contiguous()
-        tok_scale_n1_half = tok_scale_n1.to(torch.half).contiguous()
+        # Scales are already half precision
+        chan_scale_1c_half = chan_scale_1c.contiguous()
+        tok_scale_n1_half = tok_scale_n1.contiguous()
 
     # Allocate outputs
     packed_output_nc4 = torch.empty((N_ROWS, C_COLS_4), dtype=torch.uint8, device=x_tensor_nc.device)
@@ -644,7 +640,7 @@ def int2_quant_fastpath(
     # Kernel still needs (1,C) and (N,1) scales internally
     with Profiler.scope("compact._int2_quant_fastpath"):
          _int2_quant_fastpath[grid](
-             x_tensor_nc, base_tensor_nc,
+                     x_tensor_nc, base_tensor_nc,
              chan_scale_1c_half, tok_scale_n1_half, # Pass calculated scales (1,C), (N,1)
              packed_output_nc4,
              new_base_ptr,
