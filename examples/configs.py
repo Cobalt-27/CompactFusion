@@ -25,6 +25,8 @@ def get_config(model_name: str, method: str):
             config = _flux_patch_config()
         elif method == "ulysses":
             config = _disabled_config()
+        elif method == "int2patch":
+            config = _flux_int2_patch_config()
     elif model_name == "Pixart-alpha":
         if method == "binary":
             config = _pixart_binary_config()
@@ -46,6 +48,8 @@ def get_config(model_name: str, method: str):
             config = _pixart_patch_config()
         elif method == "ulysses":
             config = _disabled_config()
+        elif method == "int2patch":
+            config = _pixart_int2_patch_config()
     else:
         raise ValueError(f"Model {model_name} not supported")
     assert isinstance(config, CompactConfig)
@@ -109,6 +113,25 @@ def _flux_lowrank16_config():
         simulate=False,
         log_stats=False,
         fastpath=False,
+    )
+
+def _flux_int2_patch_config():
+    patch_config = PatchConfig(
+        use_compact=True,
+        async_comm=False,
+        async_warmup=1,
+    )
+    return CompactConfig(
+        enabled=True,
+        override_with_patch_gather_fwd=True,
+        patch_gather_fwd_config=patch_config,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.INT2 if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=-1,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=False,
+        fastpath=True,
     )
 
 def _flux_distrifusion_config():
@@ -212,6 +235,25 @@ def _pixart_lowrank16_config():
         simulate=False,
         log_stats=False,
         fastpath=False,
+    )
+
+def _pixart_int2_patch_config():
+    patch_config = PatchConfig(
+        use_compact=True,
+        async_comm=False,
+        async_warmup=1,
+    )
+    return CompactConfig(
+        enabled=True,
+        override_with_patch_gather_fwd=True,
+        patch_gather_fwd_config=patch_config,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.INT2 if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=-1,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=False,
+        fastpath=True,
     )
 
 def _pixart_distrifusion_config():
