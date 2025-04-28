@@ -408,3 +408,66 @@ def plot_eigenvalue_distribution(
             plt.close()
         else:
             plt.show()
+
+
+def dump_average_error_vs_steps(
+    stats_data,
+    save_dir: str, # Made save_dir mandatory for dumping
+):
+    """
+    Calculates average compression error and average total error vs steps across all keys
+    and dumps the data to a file.
+
+    Args:
+        stats_data: The dictionary containing the statistics (e.g., _stats.stats).
+        save_dir: Directory to save the dumped data file.
+    """
+    if not stats_data:
+        print("Error: No statistics data provided. Cannot dump error data.")
+        return
+
+    # Determine the maximum number of steps recorded across all keys
+    max_steps = 0
+    for key in stats_data:
+        max_steps = max(max_steps, len(stats_data[key]))
+
+    if max_steps == 0:
+        print("Error: No steps logged in statistics data. Cannot dump error data.")
+        return
+
+    avg_comp_errors = []
+    avg_total_errors = []
+    steps = list(range(max_steps)) # Ensure steps is a list for saving
+
+    for step in steps:
+        step_comp_errors = []
+        step_total_errors = []
+        has_total_error_this_step = False
+        for key in stats_data:
+            if step < len(stats_data[key]):
+                stat = stats_data[key][step]
+                step_comp_errors.append(stat['error'])
+                if stat.get('total_error') is not None:
+                    step_total_errors.append(stat['total_error'])
+                    has_total_error_this_step = True
+
+        # Calculate average for the current step, handle cases with no data
+        avg_comp_errors.append(float(np.mean(step_comp_errors)) if step_comp_errors else None) # Use None for missing data
+        avg_total_errors.append(float(np.mean(step_total_errors)) if has_total_error_this_step and step_total_errors else None) # Use None if no total err this step
+
+    # Prepare data for saving
+    dump_data = {
+        'steps': steps,
+        'avg_comp_errors': avg_comp_errors,
+        'avg_total_errors': avg_total_errors,
+    }
+    print(dump_data)
+    # Save the data
+    os.makedirs(save_dir, exist_ok=True)
+    filename = "average_error_vs_steps.pt"
+    filepath = os.path.join(save_dir, filename)
+    try:
+        torch.save(dump_data, filepath)
+        print(f"Saved average error data to {filepath}")
+    except Exception as e:
+        print(f"Error saving average error data to {filepath}: {e}")

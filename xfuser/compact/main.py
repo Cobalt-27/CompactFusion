@@ -7,7 +7,7 @@ from xfuser.compact.utils import (
 )
 from xfuser.prof import Profiler
 # from xfuser.modules.base_module import BaseModule
-from xfuser.compact.stats import stats_log
+from xfuser.compact.stats import stats_log, stats_hello
 import os
 from xfuser.compact.slowpath import slowpath_compress, slowpath_decompress, sim_compress
 from xfuser.compact.patchpara.df_cache import AllGatherCache
@@ -53,7 +53,7 @@ def compact_init(config: CompactConfig):
 
 def compact_hello():
     if dist.get_rank() == 0:
-        print(f"🐳  Compact initialized")
+        print("--- 🐳  Compact initialized ---")
         print(f"🟦  Compact enabled" if _config.enabled else "🟫  Compact disabled")
         if _config.enabled:
             if not _config.override_with_patch_gather_fwd:
@@ -66,6 +66,9 @@ def compact_hello():
                 patch_config = _config.patch_gather_fwd_config
                 print(f"🟨  Using DistriFusion" if patch_config.async_comm else "🟫  Sync patch para")
                 print(f"🟨  Using Compact" if patch_config.use_compact else "🟫  No compression")
+        print("------------------------------")
+        if _config.log_compress_stats and _config.enabled:
+            stats_hello()
 
 def compact_config():
     global _config

@@ -40,7 +40,7 @@ def customized_compact_config():
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.INT2
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.IDENTITY
     compact_config = CompactConfig(
         enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
@@ -51,7 +51,7 @@ def customized_compact_config():
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
-        log_stats=False,
+        log_stats=True,
         check_consist=False,
         fastpath=True and COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2],
         delta_decay_factor=0.5
@@ -155,13 +155,14 @@ def main():
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
         # Profiler.instance().enable()
 
-        from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues
+        from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues, dump_err_vs_steps
         
         if local_rank == 0:
             # pass
             stats_verbose()
             prof_result = prof_summary(Profiler.instance(), rank=local_rank)
             print(str.join("\n", prof_result))
+            dump_err_vs_steps(save_dir="results")
             # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)

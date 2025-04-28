@@ -24,6 +24,16 @@ REF_ACTIVATION_PATH = os.environ.get("REF_ACTIVATION_PATH", "ref_activations")
 DUMP_ACTIVATIONS = os.environ.get("DUMP_ACTIVATIONS", "0") == "1"
 CALC_TOTAL_ERROR = os.environ.get("CALC_TOTAL_ERROR", "0") == "1"
 
+def stats_hello():
+    print("--- 📦  Statistics Configuration ---")
+    print(f"CALC_SIMILARITY: {CALC_SIMILARITY}")
+    print(f"CALC_MORE_SIMILARITY: {CALC_MORE_SIMILARITY}")
+    print(f"PRINT_ALL_ERROR: {PRINT_ALL_ERROR}")
+    print(f"REF_ACTIVATION_PATH: {REF_ACTIVATION_PATH}")
+    print(f"DUMP_ACTIVATIONS: {DUMP_ACTIVATIONS}")
+    print(f"CALC_TOTAL_ERROR: {CALC_TOTAL_ERROR}")
+    print("------------------------------")
+
 class StatsLogger:
     """Simple statistics logger for compression metrics."""
 
@@ -596,6 +606,17 @@ class StatsLogger:
         from xfuser.compact.plot import plot_low_rank_factors
         plot_low_rank_factors(u, v, key, step, save_dir)
 
+    def dump_average_error_vs_steps(
+        self,
+        save_dir: str, # Made save_dir mandatory
+    ):
+        """Dumps average error vs steps data to a file."""
+        assert self.stats, "No statistics logged. Cannot dump data."
+        # Basic check if any data exists, detailed checks happen in the dump function
+
+        from xfuser.compact.plot import dump_average_error_vs_steps # Import renamed function
+        dump_average_error_vs_steps(self.stats, save_dir) # Call renamed function
+
 # Global stats instance
 _stats = None
 
@@ -675,3 +696,16 @@ def save_eigenvalues(save_dir="eigenvalues"):
         return
     
     _stats.save_eigenvalues(save_dir)
+
+
+def dump_err_vs_steps(save_dir: str): # Renamed, save_dir mandatory
+    """
+    Global function to dump average compression and total error vs steps data.
+    
+    Args:
+        save_dir: Directory to save the dumped data file.
+    """
+    if _stats is None:
+        print("No statistics logged. Cannot dump data.")
+        return
+    _stats.dump_average_error_vs_steps(save_dir) # Call renamed method
