@@ -44,12 +44,8 @@ def customized_compact_config():
         log_stats=False,
         check_consist=False,
         fastpath=True,
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
         delta_decay_factor=0.5,
         quantized_cache=False,
-        cache_low_rank_dim=None
     )
     return compact_config
 

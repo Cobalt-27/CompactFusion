@@ -45,7 +45,7 @@ def customized_compact_config():
         enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
-        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=32 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
@@ -54,9 +54,6 @@ def customized_compact_config():
         log_stats=False,
         check_consist=False,
         fastpath=True and COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2],
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
         delta_decay_factor=0.5
     )
     return compact_config
@@ -81,10 +78,10 @@ def main():
     """
     COMPACT
     """
-    from xfuser.compact.main import compact_init, compact_reset, compact_hello
     from examples.configs import get_config
-    # compact_config = get_config("flux", "lowrank")
+    # compact_config = get_config("Flux", "lowrankq32")
     compact_config = customized_compact_config()
+    # compact_config.log_compress_stats = True
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"

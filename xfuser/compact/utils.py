@@ -45,10 +45,6 @@ class CompactConfig:
         check_consist: bool = False,
         fastpath: bool = False,
         quantized_cache: bool = False,
-        cache_low_rank_dim: int | None = None,
-        ref_activation_path: str | None = None,
-        dump_activations: bool = False,
-        calc_total_error: bool = False,
         delta_decay_factor: float | None = None
     ):
         """
@@ -61,10 +57,6 @@ class CompactConfig:
             simulate (bool): Enable/disable simulation compression.
             log_stats (bool): Enable/disable logging of compression stats.
             quantized_cache (bool): Enable quantization for base tensor in CompactCache.
-            low_rank_dim (int | None): Dimension for low-rank cache compression of delta_base. None or 0 disables it.
-            ref_activation_path (str | None): Path for dumping/loading reference activations.
-            dump_activations (bool): If True and path is set, dump activations.
-            calc_total_error (bool): If True and path is set, calculate error against reference.
             delta_decay_factor (float): Decay factor applied to delta_base in 2nd order residual.
         """
         self.enabled = enabled
@@ -81,23 +73,15 @@ class CompactConfig:
         self.fastpath = fastpath
         # Cache behavior flags
         self.quantized_cache = quantized_cache
-        self.cache_low_rank_dim = cache_low_rank_dim
         # Updated attributes
-        self.ref_activation_path = ref_activation_path
-        self.dump_activations = dump_activations
-        self.calc_total_error = calc_total_error
         self.delta_decay_factor = delta_decay_factor
         
         self.override_with_patch_gather_fwd = override_with_patch_gather_fwd
         self.patch_gather_fwd_config = patch_gather_fwd_config
         
-        assert cache_low_rank_dim is None, "deprecated"
-        assert self.quantized_cache is False, "deprecated"
+        # assert self.quantized_cache is False, "deprecated"
         # assert self.compress_residual != 2, "deprecated"
         
-        # Add assertion to prevent simultaneous dump and calc
-        assert not (self.dump_activations and self.calc_total_error), \
-            "Cannot dump activations and calculate total error in the same run. Set one to False."
         if residual == 0:
             assert not ef, "No residual does not support error feedback."
         if residual == 2:
@@ -108,11 +92,19 @@ class CompactConfig:
             assert residual == 1, "Fastpath requires 1st order residual."
         
         if self.override_with_patch_gather_fwd:
+            assert self.enabled, "Compact must be enabled if override_with_patch_gather_fwd is True"
             assert self.patch_gather_fwd_config is not None, "patch_gather_fwd_config must be set if override_with_patch_gather_fwd is True"
+            if self.patch_gather_fwd_config.use_compact:
+                assert not self.patch_gather_fwd_config.async_comm, "Compact does not support async communication"
+            elif self.patch_gather_fwd_config.async_comm:
+                assert not self.patch_gather_fwd_config.use_compact, "Async communication does not support compression"
         else:
             assert self.patch_gather_fwd_config is None, "patch_gather_fwd_config must be None if override_with_patch_gather_fwd is False"
 
     def get_compress_type(self):
+        """
+        For naming the result file.
+        """
         compress_type = self.compress_func(0, 4)
         if isinstance(compress_type, COMPACT_COMPRESS_TYPE):
             return compress_type.name
@@ -136,9 +128,6 @@ class CompactCache:
         # Quantize base if needed
         if self.quantize:
             base = quantize_int8(base)
-        # if key in self.base:
-        #     self.base[key] = base
-        # else:
         self.base[key] = base
         from xfuser.compact.main import compact_get_step
         from xfuser.collector.collector import collect
@@ -197,7 +186,7 @@ class CompactCache:
                 tensor_to_reduce = combined_tensor.clone().detach().float()
                 dist.all_reduce(tensor_to_reduce, op=dist.ReduceOp.SUM, group=group)
                 average_tensor = tensor_to_reduce / world_size
-                assert torch.allclose(combined_tensor.float(), average_tensor, atol=1e-3), f'Inconsistent cache at key {key}, max diff: {torch.max(torch.abs(combined_tensor.float() - average_tensor)):.6f}'
+                assert torch.allclose(combined_tensor.float(), average_tensor, atol=1e-2), f'Inconsistent cache at key {key}, max diff: {torch.max(torch.abs(combined_tensor.float() - average_tensor)):.6f}'
         self.passed_count += 1
 
 

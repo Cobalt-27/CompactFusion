@@ -45,9 +45,6 @@ def main():
         log_stats=True,
         check_consist=False,
         fastpath=False,
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
         delta_decay_factor=0.3
     )
     compact_init(compact_config)

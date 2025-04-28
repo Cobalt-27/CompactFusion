@@ -50,9 +50,6 @@ def customized_compact_config():
         log_stats=False,
         check_consist=False,
         fastpath=False and COMPACT_METHOD == COMPACT_COMPRESS_TYPE.BINARY,
-        ref_activation_path='ref_activations',
-        dump_activations=False,
-        calc_total_error=False,
         delta_decay_factor=0.5
     )
     return compact_config

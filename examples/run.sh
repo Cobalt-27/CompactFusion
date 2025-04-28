@@ -14,7 +14,7 @@ declare -A MODEL_CONFIGS=(
     ["Pixart-alpha"]="pixartalpha_example.py /root/autodl-fs/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 30"
     ["Sd3"]="sd3_example.py stabilityai/stable-diffusion-3-medium-diffusers 28"
-    ["Flux"]="flux_example.py /root/autodl-fs/FLUX.1-dev 28"
+    ["Flux"]="flux_example.py black-forest-labs/FLUX.1-dev 28"
     ["HunyuanDiT"]="hunyuandit_example.py /cfs/dit/HunyuanDiT-v1.2-Diffusers 50"
 )
 
@@ -69,7 +69,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k" \
+--prompt "Romantic painting of a ship sailing in a stormy sea, with dramatic lighting and powerful waves." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
@@ -81,3 +81,5 @@ $CACHE_ARGS \
 # A child holding a flowered umbrella and petting a yak.
 # A street scene at an intersection with tall skyscrapers in the background. 
 # A man in glasses eating a donut out of a cup.
+# Romantic painting of a ship sailing in a stormy sea, with dramatic lighting and powerful waves.
+# Ethereal fantasy concept art of an elf, magnificent, celestial, ethereal, painterly, epic, majestic, magical, fantasy art, cover art, dreamy.

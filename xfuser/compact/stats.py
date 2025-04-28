@@ -15,9 +15,14 @@ EIGENVALUES_PLOT_LAYERS = []
 UV_PLOT_STEPS = []
 UV_PLOT_LAYERS = []
 
-# env var: ENABLE_STATS_SIM
-CALC_SIMILARITY = os.environ.get("ENABLE_STATS_SIM", "0") == "1"
+# ENV VARS
+CALC_SIMILARITY = os.environ.get("CALC_SIMILARITY", "0") == "1"
+CALC_MORE_SIMILARITY = os.environ.get("CALC_MORE_SIMILARITY", "0") == "1"
 PRINT_ALL_ERROR = os.environ.get("PRINT_ALL_ERROR", "0") == "1"
+
+REF_ACTIVATION_PATH = os.environ.get("REF_ACTIVATION_PATH", "ref_activations")
+DUMP_ACTIVATIONS = os.environ.get("DUMP_ACTIVATIONS", "0") == "1"
+CALC_TOTAL_ERROR = os.environ.get("CALC_TOTAL_ERROR", "0") == "1"
 
 class StatsLogger:
     """Simple statistics logger for compression metrics."""
@@ -96,9 +101,6 @@ class StatsLogger:
         recv_activation, 
         compressed_tensor, 
         compress_residual,
-        ref_activation_path: str | None = None, 
-        dump_activations: bool = False,
-        calc_total_error: bool = False
     ):
         """
         Log compression statistics for a layer.
@@ -111,11 +113,12 @@ class StatsLogger:
             recv_activation: Reconstructed activation after compression
             compressed_tensor: The tensor after compression, need decoding for real activation
             compress_residual: Residual compression level (0, 1, or 2)
-            ref_activation_path (str | None): Path for dumping/loading reference activations.
-            dump_activations (bool): If True and path is set, dump activations.
-            calc_total_error (bool): If True and path is set, calculate error against reference.
         """
 
+        ref_activation_path = REF_ACTIVATION_PATH
+        dump_activations = DUMP_ACTIVATIONS
+        calc_total_error = CALC_TOTAL_ERROR
+        
         # Increment step count for this key
         step_count = self.step_counts.get(key, 0)
         self.step_counts[key] = step_count + 1
@@ -220,41 +223,41 @@ class StatsLogger:
                     eps=1e-8 # Add epsilon for numerical stability
                 ).item()
 
-            # Calculate transmitted delta similarity
-            if transmitted_delta is not None and key in self.prev_transmitted_deltas:
-                current_transmitted_delta_flat = transmitted_delta.flatten()
-                prev_transmitted_delta_flat = self.prev_transmitted_deltas[key].flatten().to(transmitted_delta.device)
-                current_norm = torch.norm(current_transmitted_delta_flat)
-                prev_norm = torch.norm(prev_transmitted_delta_flat)
-                transmitted_delta_sim = torch.nn.functional.cosine_similarity(
-                    current_transmitted_delta_flat,
-                    prev_transmitted_delta_flat,
-                    dim=0,
-                    eps=1e-8 # Add epsilon for numerical stability
-                ).item()
+            
+            if CALC_MORE_SIMILARITY:
+                # Calculate transmitted delta similarity
+                if transmitted_delta is not None and key in self.prev_transmitted_deltas:
+                    current_transmitted_delta_flat = transmitted_delta.flatten()
+                    prev_transmitted_delta_flat = self.prev_transmitted_deltas[key].flatten().to(transmitted_delta.device)
+                    current_norm = torch.norm(current_transmitted_delta_flat)
+                    prev_norm = torch.norm(prev_transmitted_delta_flat)
+                    transmitted_delta_sim = torch.nn.functional.cosine_similarity(
+                        current_transmitted_delta_flat,
+                        prev_transmitted_delta_flat,
+                        dim=0,
+                        eps=1e-8 # Add epsilon for numerical stability
+                    ).item()
+                # Calculate base vs delta similarity
+                if base is not None and delta is not None:
+                    base_flat = base.flatten()
+                    delta_flat = delta.flatten() # Already calculated and asserted for delta_sim
+                    base_norm = torch.norm(base_flat)
+                    delta_norm_for_check = torch.norm(delta_flat) # Re-use already calculated norm if available
+                    base_delta_similarity = torch.nn.functional.cosine_similarity(
+                        base_flat,
+                        delta_flat,
+                        dim=0,
+                        eps=1e-8 # Add epsilon for numerical stability
+                    ).item()
+                # --- Calculate Adjacent Row Similarities (Stride 1) ---
+                adj1_sim_base = self._compute_strided_row_similarity(base, stride=1)
+                adj1_sim_delta = self._compute_strided_row_similarity(delta, stride=1)
+                adj1_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=1)
 
-            # Calculate base vs delta similarity
-            if base is not None and delta is not None:
-                base_flat = base.flatten()
-                delta_flat = delta.flatten() # Already calculated and asserted for delta_sim
-                base_norm = torch.norm(base_flat)
-                delta_norm_for_check = torch.norm(delta_flat) # Re-use already calculated norm if available
-                base_delta_similarity = torch.nn.functional.cosine_similarity(
-                    base_flat,
-                    delta_flat,
-                    dim=0,
-                    eps=1e-8 # Add epsilon for numerical stability
-                ).item()
-
-            # --- Calculate Adjacent Row Similarities (Stride 1) ---
-            adj1_sim_base = self._compute_strided_row_similarity(base, stride=1)
-            adj1_sim_delta = self._compute_strided_row_similarity(delta, stride=1)
-            adj1_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=1)
-
-            # --- Calculate Strided Row Similarities (Stride 4) ---
-            adj4_sim_base = self._compute_strided_row_similarity(base, stride=4)
-            adj4_sim_delta = self._compute_strided_row_similarity(delta, stride=4)
-            adj4_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=4)
+                # --- Calculate Strided Row Similarities (Stride 4) ---
+                adj4_sim_base = self._compute_strided_row_similarity(base, stride=4)
+                adj4_sim_delta = self._compute_strided_row_similarity(delta, stride=4)
+                adj4_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=4)
 
         # Compute Eigenvalues and Store Them
         layer_idx = int(key.split('-')[0])

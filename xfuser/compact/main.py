@@ -61,12 +61,11 @@ def compact_hello():
                 print(f"🟦  Simulate compress" if _config.simulate_compress else "🟫  No simulate compress")
                 print(f"🟦  Stats log" if _config.log_compress_stats else "🟫  No stats log")
                 print(f"🟦  Check consistency" if _config.check_cache_consistency else "🟫  No check consistency")
-                print(f"🟦  Dump activations" if _config.dump_activations else "🟫  No dump activations")
-                print(f"🟦  Calculate total error" if _config.calc_total_error else "🟫  No calculate total error")
             else:
                 print(f"🟧  Overrided to Patch Para")
                 patch_config = _config.patch_gather_fwd_config
                 print(f"🟨  Using DistriFusion" if patch_config.async_comm else "🟫  Sync patch para")
+                print(f"🟨  Using Compact" if patch_config.use_compact else "🟫  No compression")
 
 def compact_config():
     global _config
@@ -160,9 +159,6 @@ def _compact_compress_fastpath(cache_key, x: torch.Tensor, compress_type: COMPAC
             log_recv_activation,
             compressed,
             1,
-            ref_activation_path=_config.ref_activation_path,
-            dump_activations=_config.dump_activations,
-            calc_total_error=_config.calc_total_error
         )
     return compressed
 
@@ -224,9 +220,6 @@ def compact_compress(
                         recv_activation=reconstructed_local, 
                         compressed_tensor=compressed, 
                         compress_residual=_config.compress_residual,
-                        ref_activation_path=_config.ref_activation_path,
-                        dump_activations=_config.dump_activations,
-                        calc_total_error=_config.calc_total_error
                     )
             elif _config.compress_residual == 1:
                 base = _cache.get_base(cache_key)
@@ -244,9 +237,6 @@ def compact_compress(
                         recv_activation=reconstructed, 
                         compressed_tensor=compressed, 
                         compress_residual=_config.compress_residual,
-                        ref_activation_path=_config.ref_activation_path,
-                        dump_activations=_config.dump_activations,
-                        calc_total_error=_config.calc_total_error
                     )
             elif _config.compress_residual == 2:
                 base = _cache.get_base(cache_key)
@@ -270,9 +260,6 @@ def compact_compress(
                         new_base, # recv_activation 
                         compressed, 
                         _config.compress_residual,
-                        ref_activation_path=_config.ref_activation_path,
-                        dump_activations=_config.dump_activations,
-                        calc_total_error=_config.calc_total_error
                     )
             else:
                 raise ValueError("Invalid compress_residual value")
