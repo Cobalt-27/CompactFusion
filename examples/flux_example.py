@@ -79,10 +79,14 @@ def main():
     COMPACT
     """
     from examples.configs import get_config
-    # compact_config = get_config("Flux", "lowrankq32")
-    compact_config = customized_compact_config()
+    if TEST_ENABLE:
+        compact_config = get_config(TEST_MODEL, TEST_METHOD)
+    else:
+        # compact_config = get_config("Flux", "lowrankq32")
+        compact_config = customized_compact_config()
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
+    
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     torch.distributed.barrier()

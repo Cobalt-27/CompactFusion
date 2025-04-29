@@ -25,7 +25,7 @@ class COMPACT_COMPRESS_TYPE(Enum):
     IDENTITY = "identity"  # go thorugh the entire pipeline, but no compression
     LOW_RANK = "low-rank"
     LOW_RANK_Q = "low-rank-int4"
-    LOW_RANK_AWL = "low-rank-awl"
+    LOW_RANK_AWL = "low-rank-awl" # attn aware lowrank
 
 
 class CompactConfig:
@@ -105,6 +105,8 @@ class CompactConfig:
         """
         For naming the result file.
         """
+        if self.compress_func is None or not self.enabled:
+            return "NO_COMPACT"
         compress_type = self.compress_func(0, 4)
         if isinstance(compress_type, COMPACT_COMPRESS_TYPE):
             return compress_type.name
