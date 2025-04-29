@@ -24,3 +24,5 @@ ref_images/
 *.whl
 activations/
 *.ipynb
+!compact_plot/**/*.pt
+!compact_plot/**/*.ipynb

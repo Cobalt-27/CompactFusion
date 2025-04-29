@@ -1,0 +1,8 @@
+method,latency
+Original,15
+Ring Attention,5
+Compact-INT2,5
+Compact-Binary,5
+DistriFusion,5
+Patch Parallel,5
+Ulysses,5
