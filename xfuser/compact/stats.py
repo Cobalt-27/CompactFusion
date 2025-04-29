@@ -617,6 +617,16 @@ class StatsLogger:
         from xfuser.compact.plot import dump_average_error_vs_steps # Import renamed function
         dump_average_error_vs_steps(self.stats, save_dir) # Call renamed function
 
+    def dump_average_norms_and_similarity_vs_steps(
+        self,
+        save_dir: str,
+    ):
+        """Dumps average activation norm, delta norm, and activation similarity vs steps data to a file."""
+        assert self.stats, "No statistics logged. Cannot dump data."
+
+        from xfuser.compact.plot import dump_average_norms_and_similarity_vs_steps
+        dump_average_norms_and_similarity_vs_steps(self.stats, save_dir)
+
 # Global stats instance
 _stats = None
 
@@ -697,7 +707,6 @@ def save_eigenvalues(save_dir="eigenvalues"):
     
     _stats.save_eigenvalues(save_dir)
 
-
 def dump_err_vs_steps(save_dir: str): # Renamed, save_dir mandatory
     """
     Global function to dump average compression and total error vs steps data.
@@ -709,3 +718,16 @@ def dump_err_vs_steps(save_dir: str): # Renamed, save_dir mandatory
         print("No statistics logged. Cannot dump data.")
         return
     _stats.dump_average_error_vs_steps(save_dir) # Call renamed method
+
+def dump_norms_sim_vs_steps(save_dir: str):
+    """
+    Global function to dump average activation norm, delta norm, 
+    and activation similarity vs steps data.
+    
+    Args:
+        save_dir: Directory to save the dumped data file.
+    """
+    if _stats is None:
+        print("No statistics logged. Cannot dump data.")
+        return
+    _stats.dump_average_norms_and_similarity_vs_steps(save_dir)
