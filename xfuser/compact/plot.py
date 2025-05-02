@@ -455,14 +455,19 @@ def dump_average_error_vs_steps(
         avg_comp_errors.append(float(np.mean(step_comp_errors)) if step_comp_errors else None) # Use None for missing data
         avg_total_errors.append(float(np.mean(step_total_errors)) if has_total_error_this_step and step_total_errors else None) # Use None if no total err this step
 
-    # Prepare data for saving
+    print("Dumped avg error data:")
+    print('steps:', steps)
+    print('avg_comp_errors:', [f"{x:.2f}" if x is not None else None for x in avg_comp_errors])
+    print('avg_total_errors:', [f"{x:.2f}" if x is not None else None for x in avg_total_errors])
+
+
+    # Prepare original data for saving (without formatting)
     dump_data = {
         'steps': steps,
         'avg_comp_errors': avg_comp_errors,
         'avg_total_errors': avg_total_errors,
     }
-    print(dump_data)
-    # Save the data
+    # Save the original (unformatted) data
     os.makedirs(save_dir, exist_ok=True)
     filename = "average_error_vs_steps.pt"
     filepath = os.path.join(save_dir, filename)
@@ -471,3 +476,83 @@ def dump_average_error_vs_steps(
         print(f"Saved average error data to {filepath}")
     except Exception as e:
         print(f"Error saving average error data to {filepath}: {e}")
+
+
+def dump_average_norms_and_similarity_vs_steps(
+    stats_data,
+    save_dir: str, # Made save_dir mandatory
+):
+    """
+    Calculates average activation norm, delta norm, and activation similarity vs steps across all keys
+    and dumps the data to a file.
+
+    Args:
+        stats_data: The dictionary containing the statistics (e.g., _stats.stats).
+        save_dir: Directory to save the dumped data file.
+    """
+    if not stats_data:
+        print("Error: No statistics data provided. Cannot dump norms/similarity data.")
+        return
+
+    # Determine the maximum number of steps recorded across all keys
+    max_steps = 0
+    for key in stats_data:
+        max_steps = max(max_steps, len(stats_data[key]))
+
+    if max_steps == 0:
+        print("Error: No steps logged in statistics data. Cannot dump norms/similarity data.")
+        return
+
+    avg_act_norms = []
+    avg_delta_norms = []
+    avg_act_similarities = []
+    steps = list(range(max_steps))
+
+    for step in steps:
+        step_act_norms = []
+        step_delta_norms = []
+        step_act_similarities = []
+
+        for key in stats_data:
+            if step < len(stats_data[key]):
+                stat = stats_data[key][step]
+                # Activation Norm (always present)
+                step_act_norms.append(stat['activation_norm'])
+
+                # Delta Norm (present if residual >= 1)
+                if stat['delta_norm'] is not None:
+                    step_delta_norms.append(stat['delta_norm'])
+
+                # Activation Similarity (present if calculated)
+                if stat['activation_similarity'] is not None:
+                    step_act_similarities.append(stat['activation_similarity'])
+
+        # Calculate averages for the current step, handle cases with no data
+        avg_act_norms.append(float(np.mean(step_act_norms)) if step_act_norms else None)
+        avg_delta_norms.append(float(np.mean(step_delta_norms)) if step_delta_norms else None)
+        avg_act_similarities.append(float(np.mean(step_act_similarities)) if step_act_similarities else None)
+
+    # Print formatted data for viewing
+    print("Dumped avg norms and similarity data:")
+    print('steps:', steps)
+    print('avg_act_norms:', [f"{x:.3f}" if x is not None else None for x in avg_act_norms])
+    print('avg_delta_norms:', [f"{x:.3f}" if x is not None else None for x in avg_delta_norms])
+    print('avg_act_similarities:', [f"{x:.3f}" if x is not None else None for x in avg_act_similarities])
+
+    # Prepare original data for saving (without formatting)
+    dump_data = {
+        'steps': steps,
+        'avg_act_norms': avg_act_norms,
+        'avg_delta_norms': avg_delta_norms,
+        'avg_act_similarities': avg_act_similarities,
+    }
+
+    # Save the original (unformatted) data
+    os.makedirs(save_dir, exist_ok=True)
+    filename = "average_norms_and_similarity_vs_steps.pt"
+    filepath = os.path.join(save_dir, filename)
+    try:
+        torch.save(dump_data, filepath)
+        print(f"Saved average norms and similarity data to {filepath}")
+    except Exception as e:
+        print(f"Error saving average norms and similarity data to {filepath}: {e}")
