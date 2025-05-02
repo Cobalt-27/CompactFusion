@@ -27,6 +27,8 @@ def get_config(model_name: str, method: str):
             config = _disabled_config()
         elif method == "int2patch":
             config = _flux_int2_patch_config()
+        elif method == "int2":
+            config = _flux_int2_config()
     elif model_name == "Pixart-alpha":
         if method == "binary":
             config = _pixart_binary_config()
@@ -59,6 +61,18 @@ def _flux_binary_config():
     return CompactConfig(
         enabled=True,
         compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.BINARY if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=-1,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=False,
+        fastpath=False,
+    )
+    
+def _flux_int2_config():
+    return CompactConfig(
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.INT2 if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         comp_rank=-1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
@@ -145,7 +159,7 @@ def _flux_distrifusion_config():
         override_with_patch_gather_fwd=True,
         patch_gather_fwd_config=patch_config,
         compress_func=None,
-        ef=True,
+        ef=False,
         simulate=False,
         log_stats=False,
         fastpath=False,
@@ -170,7 +184,7 @@ def _flux_patch_config():
         override_with_patch_gather_fwd=True,
         patch_gather_fwd_config=patch_config,
         compress_func=None,
-        ef=True,
+        ef=False,
         simulate=False,
         log_stats=False,
         fastpath=False,

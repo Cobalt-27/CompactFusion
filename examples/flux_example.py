@@ -80,7 +80,7 @@ def main():
     """
     from examples.configs import get_config
     # compact_config = get_config("Flux", "lowrankq32")
-    compact_config = customized_compact_config()
+    compact_config = get_config("Flux", "df")
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
@@ -185,7 +185,7 @@ def main():
         if pipe.is_dp_last_group():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
-                image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}_{compact_config.get_compress_type()}.png"
+                image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
                 image.save(f"./results/{image_name}")
                 print(f"image {i} saved to ./results/{image_name}")
 

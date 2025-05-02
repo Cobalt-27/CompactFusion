@@ -2,7 +2,7 @@ set -x
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 export CAPTION_FILE="/root/autodl-tmp/ref_images/prompts.json"
-export SAMPLE_IMAGES_FOLODER="/root/autodl-tmp/generated_images_6"
+export SAMPLE_IMAGES_FOLODER="/root/autodl-tmp/generated_images_int2_warmpup2"
 
 # Select the model type
 export MODEL_TYPE="Flux"

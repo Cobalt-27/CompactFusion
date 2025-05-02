@@ -86,8 +86,8 @@ def patch_gather_fwd(
     # --- Communication Step (Sync or Async) ---
     if config.use_compact:
         from xfuser.compact.main import compact_all_gather
-        comp_type_k = compact_config().compress_func(mod_idx, current_iter,'k')
-        comp_type_v = compact_config().compress_func(mod_idx, current_iter,'v')
+        comp_type_k = compact_config().compress_func(mod_idx, current_iter)
+        comp_type_v = compact_config().compress_func(mod_idx, current_iter)
         k_list_for_computation = compact_all_gather(
             f"{mod_idx}-k",
             k,

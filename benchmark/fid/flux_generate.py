@@ -68,7 +68,8 @@ def main():
     """
     COMPACT
     """
-    compact_config = customized_compact_config()
+    from examples.configs import get_config
+    compact_config = get_config("Flux", "int2")
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
@@ -103,7 +104,7 @@ def main():
     
     folder_path = args.sample_images_folder
     if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+        os.makedirs(folder_path, exist_ok=True)
 
     # run multiple prompts at a time to save time
     num_prompt_one_step = 1
