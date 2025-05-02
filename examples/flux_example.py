@@ -40,20 +40,20 @@ def customized_compact_config():
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.IDENTITY
     compact_config = CompactConfig(
-        enabled=False,
+        enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
         compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
-        comp_rank=12 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
+        comp_rank=32 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
         log_stats=True,
         check_consist=False,
-        fastpath=False and COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2],
+        fastpath=True and COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2],
         delta_decay_factor=0.5
     )
     return compact_config
@@ -80,10 +80,9 @@ def main():
     """
     from examples.configs import get_config
     # compact_config = get_config("Flux", "lowrankq32")
-    compact_config = customized_compact_config()
+    compact_config = get_config("Flux", "df")
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
-    
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     torch.distributed.barrier()
@@ -156,22 +155,14 @@ def main():
         peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
         # Profiler.instance().enable()
 
-        from xfuser.compact.stats import (
-            stats_verbose, 
-            stats_verbose_steps, 
-            plot_eigenvalues, 
-            save_eigenvalues, 
-            dump_err_vs_steps,
-            dump_norms_sim_vs_steps,
-        )
+        from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues, dump_err_vs_steps
         
         if local_rank == 0:
             # pass
             stats_verbose()
             prof_result = prof_summary(Profiler.instance(), rank=local_rank)
             print(str.join("\n", prof_result))
-            # dump_err_vs_steps(save_dir="results")
-            # dump_norms_sim_vs_steps(save_dir="results")
+            dump_err_vs_steps(save_dir="results")
             # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
