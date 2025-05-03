@@ -1,8 +1,9 @@
 method,latency
 Original,15
 Ring Attention,5
-Compact-INT2,5
-Compact-Binary,5
+Compact-1bit,5
+Compact-2bit,5
 DistriFusion,5
+PipeFusion,5
 Patch Parallel,5
 Ulysses,5

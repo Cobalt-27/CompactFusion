@@ -39,7 +39,7 @@ TASK_ARGS="--height $IMG_SIZE --width $IMG_SIZE --no_use_resolution_binning"
 # On 8 gpus, pp=2, ulysses=2, ring=1, cfg_parallel=2 (split batch)
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 N_GPUS=4
-PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 4 --pipefusion_parallel_degree 1" #--pipefusion_parallel_degree 1
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 1 --pipefusion_parallel_degree 4" #--pipefusion_parallel_degree 1
 
 # CFG_ARGS="--use_cfg_parallel"
 
@@ -69,7 +69,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "A multi-colored parrot holding its foot up to its beak." \
+--prompt "A brown dog laying on the ground with a metal bowl in front of him." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \

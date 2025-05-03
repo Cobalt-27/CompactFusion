@@ -80,7 +80,7 @@ def main():
     """
     from examples.configs import get_config
     # compact_config = get_config("Flux", "lowrankq32")
-    compact_config = get_config("Flux", "df")
+    compact_config = get_config("Flux", "pipe")
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion

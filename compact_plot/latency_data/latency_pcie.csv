@@ -1,0 +1,9 @@
+method,latency
+Original,20.26
+Ring Attention,7.54
+Compact-1bit,6.86
+Compact-2bit,6.70
+DistriFusion,6.86
+PipeFusion,9.07
+Patch Parallel,6.83
+Ulysses,6.70
