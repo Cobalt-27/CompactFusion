@@ -44,6 +44,8 @@ class StatsLogger:
         self.prev_activations = {}
         self.prev_deltas = {}
         self.prev_transmitted_deltas = {} # Added storage for transmitted delta
+        self.prev_delta_before_feedback = {} # Added storage for delta before feedback
+        self.prev_delta_before_feedback_lowrank = {} # Added storage for low rank delta before feedback
         self.plot_counter = 0 # for plotting
         # For volume tracking
         self.total_original_volume = 0
@@ -175,15 +177,22 @@ class StatsLogger:
         delta_delta = None
         transmitted_delta = None
         transmitted_delta_sim = None
-        base_delta_similarity = None
-        # Adjacent row similarities (stride=1)
-        adj1_sim_base = None
-        adj1_sim_delta = None
-        adj1_sim_tx_delta = None
-        # Strided row similarities (stride=4)
-        adj4_sim_base = None
-        adj4_sim_delta = None
-        adj4_sim_tx_delta = None
+        
+        # Calculate delta before feedback (diff with actual previous activation, not delta_base)
+        delta_before_feedback = None
+        delta_before_feedback_norm = None
+        delta_before_feedback_sim = None
+        delta_before_feedback_lowrank = None
+        delta_before_feedback_lowrank_sim = None  # Added similarity for low rank version
+        
+        if key in self.prev_activations:
+            delta_before_feedback = before_comp_activation - self.prev_activations[key].to(before_comp_activation.device)
+            delta_before_feedback_norm = torch.norm(delta_before_feedback).item()
+            
+            from xfuser.compact.slowpath import sim_compress
+            from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
+            delta_before_feedback_lowrank = sim_compress(delta_before_feedback.cuda(), COMPACT_COMPRESS_TYPE.LOW_RANK, rank=8).cpu()
+            # no need for norm, just for similarity
 
         if compress_residual == 0:
             pass # No deltas calculated
@@ -232,7 +241,6 @@ class StatsLogger:
                     dim=0,
                     eps=1e-8 # Add epsilon for numerical stability
                 ).item()
-
             
             if CALC_MORE_SIMILARITY:
                 # Calculate transmitted delta similarity
@@ -247,28 +255,28 @@ class StatsLogger:
                         dim=0,
                         eps=1e-8 # Add epsilon for numerical stability
                     ).item()
-                # Calculate base vs delta similarity
-                if base is not None and delta is not None:
-                    base_flat = base.flatten()
-                    delta_flat = delta.flatten() # Already calculated and asserted for delta_sim
-                    base_norm = torch.norm(base_flat)
-                    delta_norm_for_check = torch.norm(delta_flat) # Re-use already calculated norm if available
-                    base_delta_similarity = torch.nn.functional.cosine_similarity(
-                        base_flat,
-                        delta_flat,
+                # Calculate delta before feedback similarity
+                if delta_before_feedback is not None and key in self.prev_delta_before_feedback:
+                    current_dbf_flat = delta_before_feedback.flatten()
+                    prev_dbf_flat = self.prev_delta_before_feedback[key].flatten().to(delta_before_feedback.device)
+                    delta_before_feedback_sim = torch.nn.functional.cosine_similarity(
+                        current_dbf_flat,
+                        prev_dbf_flat,
                         dim=0,
                         eps=1e-8 # Add epsilon for numerical stability
                     ).item()
-                # --- Calculate Adjacent Row Similarities (Stride 1) ---
-                adj1_sim_base = self._compute_strided_row_similarity(base, stride=1)
-                adj1_sim_delta = self._compute_strided_row_similarity(delta, stride=1)
-                adj1_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=1)
-
-                # --- Calculate Strided Row Similarities (Stride 4) ---
-                adj4_sim_base = self._compute_strided_row_similarity(base, stride=4)
-                adj4_sim_delta = self._compute_strided_row_similarity(delta, stride=4)
-                adj4_sim_tx_delta = self._compute_strided_row_similarity(transmitted_delta, stride=4)
-
+                    
+                # Calculate low rank delta before feedback similarity
+                if delta_before_feedback_lowrank is not None and key in self.prev_delta_before_feedback_lowrank:
+                    current_dbf_lr_flat = delta_before_feedback_lowrank.flatten()
+                    prev_dbf_lr_flat = self.prev_delta_before_feedback_lowrank[key].flatten().to(delta_before_feedback_lowrank.device)
+                    delta_before_feedback_lowrank_sim = torch.nn.functional.cosine_similarity(
+                        current_dbf_lr_flat,
+                        prev_dbf_lr_flat,
+                        dim=0,
+                        eps=1e-8 # Add epsilon for numerical stability
+                    ).item()
+                
         # Compute Eigenvalues and Store Them
         layer_idx = int(key.split('-')[0])
         step_idx = self.step_counts[key]
@@ -297,21 +305,15 @@ class StatsLogger:
             'activation_norm': act_norm,
             'delta_norm': delta_norm,
             'delta_delta_norm': delta_delta_norm,
+            'delta_before_feedback_norm': delta_before_feedback_norm, # Add delta before feedback norm
             'activation_similarity': act_sim,
             'delta_similarity': delta_sim,
+            'delta_before_feedback_similarity': delta_before_feedback_sim, # Add delta before feedback similarity
+            'delta_before_feedback_lowrank_similarity': delta_before_feedback_lowrank_sim, # Add low rank similarity
             'transmitted_delta_similarity': transmitted_delta_sim, # Added transmitted delta similarity
-            'base_delta_similarity': base_delta_similarity, # Added base vs delta sim
             'residual': compress_residual,
             'original_size_bytes': original_size_bytes,
             'compressed_size_bytes': compressed_size_bytes,
-            # Adjacent row similarities
-            'adj1_sim_base': adj1_sim_base,
-            'adj1_sim_delta': adj1_sim_delta,
-            'adj1_sim_tx_delta': adj1_sim_tx_delta,
-            # Stride 4 similarities
-            'adj4_sim_base': adj4_sim_base,
-            'adj4_sim_delta': adj4_sim_delta,
-            'adj4_sim_tx_delta': adj4_sim_tx_delta,
         })
 
         # Store current activations and deltas for next step similarity (on CPU to save GPU memory)
@@ -320,6 +322,10 @@ class StatsLogger:
             self.prev_deltas[key] = delta.detach().cpu()
         if transmitted_delta is not None: # Store transmitted delta
             self.prev_transmitted_deltas[key] = transmitted_delta.detach().cpu()
+        if delta_before_feedback is not None: # Store delta before feedback
+            self.prev_delta_before_feedback[key] = delta_before_feedback.detach().cpu()
+        if delta_before_feedback_lowrank is not None: # Store low rank delta before feedback
+            self.prev_delta_before_feedback_lowrank[key] = delta_before_feedback_lowrank.detach().cpu()
 
     def _compute_eigenvalues(self, tensor: torch.Tensor) -> np.ndarray:
         """
@@ -462,6 +468,13 @@ class StatsLogger:
                     delta_ratio = avg_delta_norm/avg_act_norm
                     print(f", delta={avg_delta_norm:.3f}, d/a={delta_ratio:.2f}", end="")
 
+                    # Add delta before feedback stats 
+                    dbf_norm_values = [s['delta_before_feedback_norm'] for s in stats if s.get('delta_before_feedback_norm') is not None]
+                    if dbf_norm_values:
+                        avg_dbf_norm = np.mean(dbf_norm_values)
+                        dbf_ratio = avg_dbf_norm/avg_act_norm if avg_act_norm > 1e-8 else float('inf')
+                        print(f", dbf={avg_dbf_norm:.3f}, dbf/a={dbf_ratio:.2f}", end="")
+
                 if res >= 2:
                     avg_delta_delta_norm = np.mean([s['delta_delta_norm'] for s in stats if s['delta_delta_norm'] is not None])
                     if avg_delta_norm > 0:
@@ -484,27 +497,13 @@ class StatsLogger:
                 if res >= 1:
                     _add_avg_stat(stats, 'delta_similarity', 'delta_sim', similarities)
                     _add_avg_stat(stats, 'transmitted_delta_similarity', 'tx_delta_sim', similarities)
-                    _add_avg_stat(stats, 'base_delta_similarity', 'b/d_sim', similarities)
+                
+                # Add delta before feedback similarity
+                _add_avg_stat(stats, 'delta_before_feedback_similarity', 'dbf_sim', similarities)
+                _add_avg_stat(stats, 'delta_before_feedback_lowrank_similarity', 'dbf_lr_sim', similarities)
 
                 if similarities:
                     print("  " + ", ".join(similarities)) # Indent similarity line
-
-                # Calculate and format strided row similarities
-                adj_sims_summary = []
-                # Stride 1
-                _add_avg_stat(stats, 'adj1_sim_base', 'a1_sim_b', adj_sims_summary)
-                if res >= 1:
-                    _add_avg_stat(stats, 'adj1_sim_delta', 'a1_sim_d', adj_sims_summary)
-                    _add_avg_stat(stats, 'adj1_sim_tx_delta', 'a1_sim_tx', adj_sims_summary)
-
-                # Stride 4
-                _add_avg_stat(stats, 'adj4_sim_base', 'a4_sim_b', adj_sims_summary)
-                if res >= 1:
-                    _add_avg_stat(stats, 'adj4_sim_delta', 'a4_sim_d', adj_sims_summary)
-                    _add_avg_stat(stats, 'adj4_sim_tx_delta', 'a4_sim_tx', adj_sims_summary)
-
-                if adj_sims_summary:
-                    print("    " + ", ".join(adj_sims_summary)) # Indent further
 
     def summary_compression_volume(self):
         """Prints the total data volume before and after compression and the ratio."""
@@ -538,6 +537,14 @@ class StatsLogger:
                 if s['residual'] >= 1 and s['delta_norm'] is not None:
                     delta_values.append(s['delta_norm'])
         mean_delta = np.mean(delta_values) if delta_values else None
+        
+        # Calculate average delta before feedback norm
+        dbf_values = []
+        for stats_list in self.stats.values():
+            for s in stats_list:
+                if s.get('delta_before_feedback_norm') is not None:
+                    dbf_values.append(s['delta_before_feedback_norm'])
+        mean_dbf = np.mean(dbf_values) if dbf_values else None
 
         # Calculate average delta-delta norm (for residual >= 2)
         dd_values = []
@@ -550,7 +557,40 @@ class StatsLogger:
         # Print all averages on one line
         print(f"🟫 avg activation: {mean_act:.3f}" + 
               (f", avg delta: {mean_delta:.3f}" if mean_delta is not None else "") + 
+              (f", avg dbf: {mean_dbf:.3f}" if mean_dbf is not None else "") +
               (f", avg delta-delta: {mean_dd:.3f}" if mean_dd is not None else ""))
+              
+        # Helper function to calculate average of a similarity metric
+        def calc_avg_similarity(metric_key):
+            values = []
+            for stats_list in self.stats.values():
+                for s in stats_list:
+                    if s.get(metric_key) is not None:
+                        values.append(s[metric_key])
+            return np.mean(values) if values else None
+        
+        # Calculate average similarities
+        mean_act_sim = calc_avg_similarity('activation_similarity')
+        mean_delta_sim = calc_avg_similarity('delta_similarity')
+        mean_dbf_sim = calc_avg_similarity('delta_before_feedback_similarity')
+        mean_dbf_lr_sim = calc_avg_similarity('delta_before_feedback_lowrank_similarity')
+        mean_tx_delta_sim = calc_avg_similarity('transmitted_delta_similarity')
+        
+        # Print average similarities
+        sim_parts = []
+        if mean_act_sim is not None:
+            sim_parts.append(f"act_sim: {mean_act_sim:.3f}")
+        if mean_delta_sim is not None:
+            sim_parts.append(f"delta_sim: {mean_delta_sim:.3f}")
+        if mean_dbf_sim is not None:
+            sim_parts.append(f"dbf_sim: {mean_dbf_sim:.3f}")
+        if mean_dbf_lr_sim is not None:
+            sim_parts.append(f"dbf_lr_sim: {mean_dbf_lr_sim:.3f}")
+        if mean_tx_delta_sim is not None:
+            sim_parts.append(f"tx_delta_sim: {mean_tx_delta_sim:.3f}")
+            
+        if sim_parts:
+            print(f"🟪 avg similarities: {', '.join(sim_parts)}")
 
         mean_err = np.mean([np.mean([s['error'] for s in stats]) for stats in self.stats.values()])
 
