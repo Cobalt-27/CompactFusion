@@ -80,7 +80,7 @@ def main():
     """
     from examples.configs import get_config
     # compact_config = get_config("Flux", "lowrankq32")
-    compact_config = get_config("Flux", "pipe")
+    compact_config = get_config("Flux", "lowrank8")
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
@@ -112,10 +112,10 @@ def main():
         
     from xfuser.collector.collector import Collector, init
     collector = Collector(
-        save_dir="./results/collector", 
+        save_dir="./results/collector_lowrank8_iter16", 
         target_steps=None,
         target_layers=None,
-        enabled=False,
+        enabled=True,
         rank=local_rank
     )
     init(collector)
@@ -134,7 +134,7 @@ def main():
         LOOP_COUNT = 1
 
     profiler = Profiler().instance()
-    # profiler.disable()
+    profiler.disable()
     for i in range(LOOP_COUNT):
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
@@ -160,9 +160,9 @@ def main():
         if local_rank == 0:
             # pass
             stats_verbose()
-            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            print(str.join("\n", prof_result))
-            dump_err_vs_steps(save_dir="results")
+            # prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            # print(str.join("\n", prof_result))
+            # dump_err_vs_steps(save_dir="results")
             # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
