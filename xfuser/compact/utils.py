@@ -82,14 +82,20 @@ class CompactConfig:
         # assert self.quantized_cache is False, "deprecated"
         # assert self.compress_residual != 2, "deprecated"
         
-        if residual == 0:
-            assert not ef, "No residual does not support error feedback."
+        # if residual == 0:
+        #     assert not ef, "No residual does not support error feedback."
+        # if residual == 2:
+        #     assert ef, "2nd order compression requires error feedback enabled."
+        # if self.fastpath:
+        #     assert ef, "Fastpath requires error feedback enabled."
+        #     assert not simulate, "Fastpath does not support simulation."
+        #     assert residual == 1, "Fastpath requires 1st order residual."
+
         if residual == 2:
             assert ef, "2nd order compression requires error feedback enabled."
         if self.fastpath:
             assert ef, "Fastpath requires error feedback enabled."
             assert not simulate, "Fastpath does not support simulation."
-            assert residual == 1, "Fastpath requires 1st order residual."
         
         if self.override_with_patch_gather_fwd:
             assert self.enabled, "Compact must be enabled if override_with_patch_gather_fwd is True"

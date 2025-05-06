@@ -4,9 +4,12 @@ from xfuser.compact.utils import CompactConfig, COMPACT_COMPRESS_TYPE
 from xfuser.compact.patchpara.df_utils import PatchConfig
 
 def get_config(model_name: str, method: str):
+    print(f"get_config: model_name={model_name}, method={method}")
     if model_name == "Flux":
         if method == "binary":
             config = _flux_binary_config()
+        elif method == "int2":
+            config = _flux_int2_config()
         elif method == "lowrank12":
             config = _flux_lowrank12_config()
         elif method == "lowrank8":
@@ -81,6 +84,18 @@ def _flux_int2_config():
         fastpath=True,
     )
 
+def _flux_int2_config():
+    return CompactConfig(
+        enabled=True,
+        compress_func=lambda layer_idx, step: COMPACT_COMPRESS_TYPE.INT2 if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        comp_rank=-1,
+        residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
+        ef=True,
+        simulate=False,
+        log_stats=False,
+        fastpath=True,
+    )
+
 def _flux_lowrank12_config():
     return CompactConfig(
         enabled=True,
@@ -131,7 +146,7 @@ def _flux_lowrank16_config():
 
 def _flux_int2_patch_config():
     patch_config = PatchConfig(
-        use_compact=True,
+        use_compact=False,
         async_comm=False,
         async_warmup=1,
     )

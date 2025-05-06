@@ -32,13 +32,13 @@ def customized_compact_config():
     """
     COMPACT
     """
-    assert not TEST_ENABLE
+    # assert not TEST_ENABLE
     prepared_patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
         async_warmup=1,
     )
-    OVERRIDE_WITH_PATCH_PARA = False
+    OVERRIDE_WITH_PATCH_PARA = True
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
     COMPACT_METHOD = COMPACT_COMPRESS_TYPE.IDENTITY
     compact_config = CompactConfig(
@@ -61,6 +61,22 @@ def customized_compact_config():
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
+
+    parser.add_argument(
+        '--save_dir',
+        type=str,
+        default='testLog/flux_example/',
+        help="Save log dir"
+    )
+
+    parser.add_argument(
+        '--test_loop_warmup',
+        type=int,
+        default=0,
+        help="Test warmup"
+    )
+    
+
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
     engine_config, input_config = engine_args.create_config()
@@ -79,8 +95,13 @@ def main():
     COMPACT
     """
     from examples.configs import get_config
-    # compact_config = get_config("Flux", "lowrankq32")
-    compact_config = get_config("Flux", "lowrank8")
+    from examples.configs import get_config
+    if TEST_ENABLE:
+        compact_config = get_config(TEST_MODEL, TEST_METHOD)
+    else:
+        # compact_config = get_config("Flux", "lowrankq32")
+        compact_config = get_config("Flux", "lowrank8")
+    # compact_config = customized_compact_config()
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
@@ -133,9 +154,15 @@ def main():
     else:
         LOOP_COUNT = 1
 
-    profiler = Profiler().instance()
-    profiler.disable()
+    elapsed_time = 0
+    prof_result_output = []
+
+    warmup_count = args.test_loop_warmup
     for i in range(LOOP_COUNT):
+        if local_rank == 0:
+            if LOOP_COUNT > 1:
+                print(f"============= LOOP {i} started =============")
+
         torch.cuda.reset_peak_memory_stats()
         start_time = time.time()
         compact_reset()
@@ -150,25 +177,29 @@ def main():
                 guidance_scale=0.0,
                 generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
             )
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
-        # Profiler.instance().enable()
+            end_time = time.time()
+            if warmup_count <= 0:    
+                elapsed_time += (end_time - start_time)
+                peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+                # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues, dump_err_vs_steps
         
         if local_rank == 0:
             # pass
             stats_verbose()
-            # prof_result = prof_summary(Profiler.instance(), rank=local_rank)
-            # print(str.join("\n", prof_result))
-            # dump_err_vs_steps(save_dir="results")
+            prof_result = prof_summary(Profiler.instance(), rank=local_rank)
+            print(str.join("\n", prof_result))
+            if warmup_count <= 0:
+                prof_result_output.append(prof_result)
             # plot_eigenvalues(data_type="activation", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # plot_eigenvalues(data_type="delta_delta", save_dir="./results/plot_eigenvalues", cum_sum=True, log_scale=False)
             # save_eigenvalues(save_dir="./results/eigenvalues")
         # NOTE: sync() should be called after summary()
-        Profiler.instance().sync() # IMPORTANT: sync to collect cuda events
+        Profiler.instance().sync() # IMPORTANT: sync to collect cuda events    
+        warmup_count -= 1
+
     parallel_info = (
         f"dp{engine_args.data_parallel_degree}_cfg{engine_config.parallel_config.cfg_degree}_"
         f"ulysses{engine_args.ulysses_degree}_ring{engine_args.ring_degree}_"
@@ -186,14 +217,40 @@ def main():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
+                # _{compact_config.get_compress_type()}.png"
                 image.save(f"./results/{image_name}")
                 print(f"image {i} saved to ./results/{image_name}")
 
-    if get_world_group().rank == get_world_group().world_size - 1:
+    avg_time = elapsed_time / (LOOP_COUNT - args.test_loop_warmup)
+    
+    # if get_world_group().rank == get_world_group().world_size - 1:
+    if local_rank == 0:
+        # running info
         print(
-            f"epoch time: {elapsed_time:.2f} sec, parameter memory: {parameter_peak_memory/1e9:.2f} GB, memory: {peak_memory/1e9:.2f} GB"
+            f"avg epoch time: {avg_time:.2f} sec, parameter memory: {parameter_peak_memory/1e9:.2f} GB, memory: {peak_memory/1e9:.2f} GB"
         )
-    get_runtime_state().destory_distributed_env()
+    get_runtime_state().destory_distributed_env()  
+
+    # save prof_result_output to file
+    os.makedirs(args.save_dir, exist_ok=True)
+    # os.makedirs(os.path.join(args.save_dir, "profiler_info"), exist_ok=True)
+    # os.makedirs(os.path.join(args.save_dir, "running_info"), exist_ok=True)
+    
+    if local_rank == 0:
+        save_file_name = os.path.join(args.save_dir, f"profiler_info_{parallel_info}.txt")
+        with open(save_file_name, 'w',encoding='utf-8') as f:
+            for prof_result in prof_result_output:
+                f.write(str.join("\n", prof_result))
+
+        # save running info
+        save_file_name = os.path.join(args.save_dir, f"running_info_{parallel_info}.txt")
+        with open(save_file_name, 'w') as f:
+            f.write(f"avg epoch time: {avg_time:.2f} sec, model memory: {parameter_peak_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB\n")
+
+
+    # os.makedirs(os.path.dirname(args.save_log_name), exist_ok=True)
+    # with open(args.save_log_name, 'a') as f:
+    #     f.write(f"avg epoch time: {avg_time:.2f} sec, model memory: {parameter_peak_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB\n")
 
 
 if __name__ == "__main__":

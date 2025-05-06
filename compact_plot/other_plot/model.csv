@@ -1,0 +1,11 @@
+Model Name,Release Date,Parameters (Billions)
+DDPM,2020-06,0.256
+Latent Diffusion Model (LDM),2021-12,3.0
+DALL-E 2,2022-04,3.5
+Stable Diffusion 1.5,2022-10,0.98
+Stable Diffusion 2.x,2022-11,0.98
+Stable Diffusion XL (SDXL),2023-07,3.5
+Stable Diffusion 3 Large,2024-02,8.0
+FLUX.1 Dev,2024-08,12.0
+Stable Diffusion 3.5 Large,2024-10,8.1
+HiDream-I1,2025-04,17.0

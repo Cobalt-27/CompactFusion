@@ -1,0 +1,4 @@
+NVLink Version,Associated GPU Architecture,Approx. Release Time (Year/Quarter),Total Bandwidth per GPU (GB/s)
+3.0,Ampere,2020Q2,600
+4.0,Hopper,2022Q3,900
+5.0,Blackwell,2024Q4,1800
