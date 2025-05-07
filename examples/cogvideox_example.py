@@ -63,10 +63,11 @@ def main():
     Compact
     """
     from configs import get_config
-    compact_config = get_config("CogVideoX", "ring")
+    compact_config = get_config("CogVideoX", "binary")
     if compact_config.enabled:
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     compact_init(compact_config)
+    compact_hello()
     torch.distributed.barrier()
 
     pipe = xFuserCogVideoXPipeline.from_pretrained(

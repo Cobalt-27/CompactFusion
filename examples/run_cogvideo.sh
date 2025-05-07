@@ -5,7 +5,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # CogVideoX configuration
 SCRIPT="cogvideox_example.py"
-MODEL_ID="/mnt/CogVideoX1.5-5B"
+MODEL_ID="/root/autodl-fs/CogVideoX1.5-5B"
 INFERENCE_STEP=50
 
 mkdir -p ./results
@@ -24,7 +24,7 @@ CFG_ARGS=""
 # PIPEFUSION_ARGS="--num_pipeline_patch 8"
 # OUTPUT_ARGS="--output_type latent"
 # PARALLLEL_VAE="--use_parallel_vae"
-ENABLE_TILING="--enable_tiling"
+ENABLE_TILING="--enable_tiling --enable_slicing"
 COMPILE_FLAG="--use_torch_compile"
 
 prompt="A panda, dressed in a small, red jacket and a tiny hat, sits on a wooden stool in a serene bamboo forest. "
