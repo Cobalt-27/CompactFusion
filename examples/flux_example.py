@@ -40,13 +40,13 @@ def customized_compact_config():
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.INT2
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.BINARY
     compact_config = CompactConfig(
         enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
         compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
-        sparse_ratio=8,
+        sparse_ratio=2,
         comp_rank=32 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
@@ -85,8 +85,8 @@ def main():
         compact_config = get_config(TEST_MODEL, TEST_METHOD)
     else:
         # compact_config = get_config("Flux", "lowrankq32")
-        compact_config = get_config("Flux", "lowrank8")
-    # compact_config = customized_compact_config()
+        # compact_config = get_config("Flux", "lowrank8")
+        compact_config = customized_compact_config()
     # compact_config.log_compress_stats = True
     compact_init(compact_config)
     if compact_config.enabled: # IMPORTANT: Compact should be disabled when using pipefusion
@@ -121,7 +121,7 @@ def main():
         save_dir="./results/collector_lowrank8_iter16", 
         target_steps=None,
         target_layers=None,
-        enabled=True,
+        enabled=False,
         rank=local_rank
     )
     init(collector)
@@ -163,9 +163,11 @@ def main():
                 generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
             )
             end_time = time.time()
-            if warmup_count <= 0:    
+            if warmup_count <= 0 and TEST_ENABLE:    
                 elapsed_time += (end_time - start_time)
-                peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
+            else:
+                elapsed_time += (end_time - start_time)
+            peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
                 # Profiler.instance().enable()
 
         from xfuser.compact.stats import stats_verbose, stats_verbose_steps, plot_eigenvalues, save_eigenvalues, dump_err_vs_steps
@@ -202,35 +204,36 @@ def main():
             for i, image in enumerate(output.images):
                 image_rank = dp_group_index * dp_batch_size + i
                 image_name = f"flux_result_{parallel_info}_{image_rank}_tc_{engine_args.use_torch_compile}.png"
-                # _{compact_config.get_compress_type()}.png"
                 image.save(f"./results/{image_name}")
                 print(f"image {i} saved to ./results/{image_name}")
-
-    avg_time = elapsed_time / (LOOP_COUNT - args.test_loop_warmup)
+    if local_rank == 0:
+        print(f"elapsed_time: {elapsed_time:.2f} sec")
     
     # if get_world_group().rank == get_world_group().world_size - 1:
-    if local_rank == 0:
+    if local_rank == 0 and TEST_ENABLE:
+        avg_time = elapsed_time / (LOOP_COUNT - TEST_WARMUP_LOOP)
         # running info
         print(
             f"avg epoch time: {avg_time:.2f} sec, parameter memory: {parameter_peak_memory/1e9:.2f} GB, memory: {peak_memory/1e9:.2f} GB"
         )
     get_runtime_state().destory_distributed_env()  
 
-    # save prof_result_output to file
-    os.makedirs(TEST_SAVE_DIR, exist_ok=True)
-    # os.makedirs(os.path.join(args.save_dir, "profiler_info"), exist_ok=True)
-    # os.makedirs(os.path.join(args.save_dir, "running_info"), exist_ok=True)
-    
-    if local_rank == 0:
-        save_file_name = os.path.join(TEST_SAVE_DIR, f"profiler_info_{parallel_info}.txt")
-        with open(save_file_name, 'w',encoding='utf-8') as f:
-            for prof_result in prof_result_output:
-                f.write(str.join("\n", prof_result))
+    if TEST_ENABLE:
+        # save prof_result_output to file
+        os.makedirs(TEST_SAVE_DIR, exist_ok=True)
+        # os.makedirs(os.path.join(args.save_dir, "profiler_info"), exist_ok=True)
+        # os.makedirs(os.path.join(args.save_dir, "running_info"), exist_ok=True)
+        
+        if local_rank == 0:
+            save_file_name = os.path.join(TEST_SAVE_DIR, f"profiler_info_{parallel_info}.txt")
+            with open(save_file_name, 'w',encoding='utf-8') as f:
+                for prof_result in prof_result_output:
+                    f.write(str.join("\n", prof_result))
 
-        # save running info
-        save_file_name = os.path.join(TEST_SAVE_DIR, f"running_info_{parallel_info}.txt")
-        with open(save_file_name, 'w') as f:
-            f.write(f"avg epoch time: {avg_time:.2f} sec, model memory: {parameter_peak_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB\n")
+            # save running info
+            save_file_name = os.path.join(TEST_SAVE_DIR, f"running_info_{parallel_info}.txt")
+            with open(save_file_name, 'w') as f:
+                f.write(f"avg epoch time: {avg_time:.2f} sec, model memory: {parameter_peak_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB\n")
 
 
     # os.makedirs(os.path.dirname(args.save_log_name), exist_ok=True)
