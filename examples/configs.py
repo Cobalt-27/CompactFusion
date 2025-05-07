@@ -5,7 +5,7 @@ from xfuser.compact.patchpara.df_utils import PatchConfig
 
 def get_config(model_name: str, method: str):
     print(f"get_config: model_name={model_name}, method={method}")
-    if model_name in ["Flux", "Pixart-alpha"]:
+    if model_name in ["Flux", "Pixart-alpha", "CogVideoX"]:
         if method == "binary":
             config = _binary_config()
         elif method == "int2":
