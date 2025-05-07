@@ -3,7 +3,7 @@ set -x
 
 TEST_METHOD=${1:-ring}
 # TEST_ENABLE = bool(os.environ.get('COMPACT_TEST_ENABLE', False))
-export COMPACT_TEST_ENABLE=true
+# export COMPACT_TEST_ENABLE=true
 export COMPACT_TEST_METHOD=$TEST_METHOD
 export COMPACT_TEST_LOOP=1
 # Select the model type
@@ -25,7 +25,7 @@ export HF_HOME=/mnt/hf
 # Configuration for different model types
 # script, model_id, inference_step
 declare -A MODEL_CONFIGS=(
-    ["Pixart-alpha"]="pixartalpha_example.py /root/autodl-fs/PixArt-XL-2-1024-MS 20"
+    ["Pixart-alpha"]="pixartalpha_example.py Pixart-alpha/PixArt-XL-2-1024-MS 20"
     ["Pixart-sigma"]="pixartsigma_example.py /cfs/dit/PixArt-Sigma-XL-2-2K-MS 30"
     ["Sd3"]="sd3_example.py stabilityai/stable-diffusion-3-medium-diffusers 28"
     ["Flux"]="flux_example.py black-forest-labs/FLUX.1-dev 28"
@@ -41,7 +41,7 @@ else
 fi
 
 mkdir -p ./results
-export LOG_LEVEL=error # level: A string ('debug', 'info', 'warning', 'error', 'critical') 
+export LOG_LEVEL=info # level: A string ('debug', 'info', 'warning', 'error', 'critical') 
 
 # task args
 TASK_ARGS="--height $IMG_SIZE --width $IMG_SIZE --no_use_resolution_binning"
@@ -77,20 +77,22 @@ PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 4 --pipefusion_parallel_degree 1
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
---save_dir $SAVE_DIR_NAME \
 $PARALLEL_ARGS \
 $TASK_ARGS \
 $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---test_loop_warmup 1 \
---prompt "Romantic painting of a ship sailing in a stormy sea, with dramatic lighting and powerful waves." \
+--prompt "A man in glasses eating a donut out of a cup." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
 $CACHE_ARGS \
+
+# --save_dir $SAVE_DIR_NAME \
+# --test_loop_warmup 1 \
+
 # --output_type latent \
 # 3 dogs wearing coats
 # Astronaut in a jungle, cold color palette, muted colors, detailed, 8k
