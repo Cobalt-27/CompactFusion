@@ -8,6 +8,8 @@ export COMPACT_TEST_METHOD=$TEST_METHOD
 export COMPACT_TEST_LOOP=1
 # Select the model type
 export COMPACT_TEST_MODEL=flux
+export COMPACT_TEST_SAVE_DIR=$SAVE_DIR_NAME
+export COMPACT_TEST_WARMUP_LOOP=1
 
 export MODEL_TYPE="Flux"
 
@@ -89,9 +91,6 @@ $PARALLLEL_VAE \
 $COMPILE_FLAG \
 $QUANTIZE_FLAG \
 $CACHE_ARGS \
-
-# --save_dir $SAVE_DIR_NAME \
-# --test_loop_warmup 1 \
 
 # --output_type latent \
 # 3 dogs wearing coats

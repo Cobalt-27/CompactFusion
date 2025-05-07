@@ -26,7 +26,7 @@ from xfuser.compact.utils import COMPACT_COMPRESS_TYPE
 from xfuser.compact.patchpara.df_utils import PatchConfig
 from xfuser.prof import Profiler, prof_summary
 import diffusers.utils.logging
-from examples.test_utils import TEST_ENABLE, TEST_MODEL, TEST_METHOD, TEST_LOOP, test_hello
+from examples.test_utils import TEST_ENABLE, TEST_MODEL, TEST_METHOD, TEST_LOOP, test_hello, TEST_SAVE_DIR, TEST_WARMUP_LOOP
 
 def customized_compact_config():
     """
@@ -38,9 +38,9 @@ def customized_compact_config():
         async_comm=True,
         async_warmup=1,
     )
-    OVERRIDE_WITH_PATCH_PARA = True
+    OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.IDENTITY
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.INT2
     compact_config = CompactConfig(
         enabled=True,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
@@ -61,21 +61,6 @@ def customized_compact_config():
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
-
-    parser.add_argument(
-        '--save_dir',
-        type=str,
-        default='testLog/flux_example/',
-        help="Save log dir"
-    )
-
-    parser.add_argument(
-        '--test_loop_warmup',
-        type=int,
-        default=0,
-        help="Test warmup"
-    )
-    
 
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
@@ -157,7 +142,7 @@ def main():
     elapsed_time = 0
     prof_result_output = []
 
-    warmup_count = args.test_loop_warmup
+    warmup_count = TEST_WARMUP_LOOP
     for i in range(LOOP_COUNT):
         if local_rank == 0:
             if LOOP_COUNT > 1:
@@ -232,18 +217,18 @@ def main():
     get_runtime_state().destory_distributed_env()  
 
     # save prof_result_output to file
-    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(TEST_SAVE_DIR, exist_ok=True)
     # os.makedirs(os.path.join(args.save_dir, "profiler_info"), exist_ok=True)
     # os.makedirs(os.path.join(args.save_dir, "running_info"), exist_ok=True)
     
     if local_rank == 0:
-        save_file_name = os.path.join(args.save_dir, f"profiler_info_{parallel_info}.txt")
+        save_file_name = os.path.join(TEST_SAVE_DIR, f"profiler_info_{parallel_info}.txt")
         with open(save_file_name, 'w',encoding='utf-8') as f:
             for prof_result in prof_result_output:
                 f.write(str.join("\n", prof_result))
 
         # save running info
-        save_file_name = os.path.join(args.save_dir, f"running_info_{parallel_info}.txt")
+        save_file_name = os.path.join(TEST_SAVE_DIR, f"running_info_{parallel_info}.txt")
         with open(save_file_name, 'w') as f:
             f.write(f"avg epoch time: {avg_time:.2f} sec, model memory: {parameter_peak_memory/1e9:.2f} GB, overall memory: {peak_memory/1e9:.2f} GB\n")
 
