@@ -4,12 +4,12 @@ set -x
 TEST_METHOD=${1:-ring}
 # TEST_ENABLE = bool(os.environ.get('COMPACT_TEST_ENABLE', False))
 # export COMPACT_TEST_ENABLE=true
-export COMPACT_TEST_METHOD=$TEST_METHOD
-export COMPACT_TEST_LOOP=1
-# Select the model type
-export COMPACT_TEST_MODEL=flux
-export COMPACT_TEST_SAVE_DIR=$SAVE_DIR_NAME
-export COMPACT_TEST_WARMUP_LOOP=1
+# export COMPACT_TEST_METHOD=$TEST_METHOD
+# export COMPACT_TEST_LOOP=1
+# # Select the model type
+# export COMPACT_TEST_MODEL=flux
+# export COMPACT_TEST_SAVE_DIR=$SAVE_DIR_NAME
+# export COMPACT_TEST_WARMUP_LOOP=1
 
 export MODEL_TYPE="Flux"
 
@@ -85,7 +85,7 @@ $PIPEFUSION_ARGS \
 $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 1 \
---prompt "A man in glasses eating a donut out of a cup." \
+--prompt "A plane sitting on a runway getting ready to be emptied." \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $COMPILE_FLAG \
