@@ -25,22 +25,22 @@ def customized_compact_config():
     prepared_patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
-        async_warmup=1,
+        async_warmup=6,
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.INT2
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK_Q
     compact_config = CompactConfig(
-        enabled=True,
+        enabled=False,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
-        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 1 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 6 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=32 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta
         ef=True,
         simulate=False or COMPACT_METHOD == COMPACT_COMPRESS_TYPE.IDENTITY,
-        log_stats=True,
+        log_stats=False,
         check_consist=False,
         fastpath=True and COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2],
         delta_decay_factor=0.5
@@ -48,7 +48,7 @@ def customized_compact_config():
     return compact_config
 
 def main():
-    raise NotImplementedError("CogVideoX does not support FP16, while Compact only supports FP16.")
+    # raise NotImplementedError("CogVideoX does not support FP16, while Compact only supports FP16.")
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
@@ -64,7 +64,8 @@ def main():
     Compact
     """
     from configs import get_config
-    compact_config = get_config("CogVideoX", "binary")
+    # compact_config = get_config("CogVideoX", "binary")
+    compact_config = customized_compact_config()
     if compact_config.enabled:
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     compact_init(compact_config)
@@ -74,7 +75,7 @@ def main():
     pipe = xFuserCogVideoXPipeline.from_pretrained(
         pretrained_model_name_or_path=engine_config.model_config.model,
         engine_config=engine_config,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.half,
     )
     if args.enable_sequential_cpu_offload:
         pipe.enable_sequential_cpu_offload(gpu_id=local_rank)
@@ -146,7 +147,7 @@ def main():
     if is_dp_last_group():
         resolution = f"{input_config.width}x{input_config.height}"
         output_filename = f"results/cogvideox_{parallel_info}_{resolution}.mp4"
-        export_to_video(output, output_filename, fps=16)
+        export_to_video(output, output_filename, fps=8)
         print(f"output saved to {output_filename}")
 
     if get_world_group().rank == get_world_group().world_size - 1:

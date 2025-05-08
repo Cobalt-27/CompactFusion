@@ -5,16 +5,16 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # CogVideoX configuration
 SCRIPT="cogvideox_example.py"
-MODEL_ID="/root/autodl-fs/CogVideoX1.5-5B"
+MODEL_ID="THUDM/CogVideoX-2b"
 INFERENCE_STEP=50
 
 mkdir -p ./results
 
 # CogVideoX specific task args
-TASK_ARGS="--height 768 --width 1360 --num_frames 81"
+TASK_ARGS="--height 480 --width 720 --num_frames 49"
 
 # CogVideoX parallel configuration
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 N_GPUS=2
 PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 2"
 CFG_ARGS=""
@@ -27,12 +27,7 @@ CFG_ARGS=""
 ENABLE_TILING="--enable_tiling --enable_slicing"
 COMPILE_FLAG="--use_torch_compile"
 
-prompt="A panda, dressed in a small, red jacket and a tiny hat, sits on a wooden stool in a serene bamboo forest. "
-prompt+="The panda's fluffy paws strum a miniature acoustic guitar, producing soft, melodic tunes. Nearby, a few other "
-prompt+="pandas gather, watching curiously and some clapping in rhythm. Sunlight filters through the tall bamboo, "
-prompt+="casting a gentle glow on the scene. The panda's face is expressive, showing concentration and joy as it plays. "
-prompt+="The background includes a small, flowing stream and vibrant green foliage, enhancing the peaceful and magical "
-prompt+="atmosphere of this unique musical performance."
+prompt="A detailed wooden toy ship with intricately carved masts and sails is seen gliding smoothly over a plush, blue carpet that mimics the waves of the sea. The ship's hull is painted a rich brown, with tiny windows. The carpet, soft and textured, provides a perfect backdrop, resembling an oceanic expanse. Surrounding the ship are various other toys and children's items, hinting at a playful environment. The scene captures the innocence and imagination of childhood, with the toy ship's journey symbolizing endless adventures in a whimsical, indoor setting."
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
@@ -43,7 +38,7 @@ $OUTPUT_ARGS \
 --num_inference_steps $INFERENCE_STEP \
 --warmup_steps 0 \
 --prompt "$prompt" \
---guidance_scale 7.5 \
+--guidance_scale 6 \
 $CFG_ARGS \
 $PARALLLEL_VAE \
 $ENABLE_TILING \
