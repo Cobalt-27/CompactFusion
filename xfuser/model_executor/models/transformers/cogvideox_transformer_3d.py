@@ -30,6 +30,10 @@ from xfuser.core.distributed import (
 from xfuser.model_executor.models.transformers.register import xFuserTransformerWrappersRegister
 from xfuser.model_executor.models.transformers.base_transformer import xFuserTransformerBaseWrapper
 
+from diffusers.models.transformers.cogvideox_transformer_3d import CogVideoXBlock
+from diffusers.models.attention_processor import CogVideoXAttnProcessor2_0
+from xfuser.model_executor.layers.attention_processor import xFuserCogVideoXAttnProcessor2_0
+
 logger = init_logger(__name__)
 
 
@@ -44,6 +48,13 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
             submodule_classes_to_wrap=[nn.Conv2d, CogVideoXPatchEmbed],
             submodule_name_to_wrap=["attn1"]
         )
+        """
+        Replace the original CogVideoXAttnProcessor2_0 with xFuserCogVideoXAttnProcessor2_0
+        """
+        for module in self.modules():
+            if isinstance(module, CogVideoXBlock):
+                if isinstance(module.attn1.processor, CogVideoXAttnProcessor2_0):
+                    module.attn1.processor = xFuserCogVideoXAttnProcessor2_0()
     
     @xFuserBaseWrapper.forward_check_condition
     def forward(

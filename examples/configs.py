@@ -44,7 +44,7 @@ def _binary_config():
         ef=True,
         simulate=False,
         log_stats=False,
-        fastpath=False,
+        fastpath=True,
     )
     
 def _int2_config():

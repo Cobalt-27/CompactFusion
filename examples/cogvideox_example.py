@@ -63,10 +63,11 @@ def main():
     Compact
     """
     from configs import get_config
-    compact_config = get_config("CogVideoX", "ring")
+    compact_config = get_config("CogVideoX", "binary")
     if compact_config.enabled:
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     compact_init(compact_config)
+    compact_hello()
     torch.distributed.barrier()
 
     pipe = xFuserCogVideoXPipeline.from_pretrained(
@@ -127,6 +128,7 @@ def main():
             num_frames=input_config.num_frames,
             prompt=input_config.prompt,
             num_inference_steps=input_config.num_inference_steps,
+            guidance_scale=input_config.guidance_scale,
             generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
         ).frames[0]
 
@@ -143,7 +145,7 @@ def main():
     if is_dp_last_group():
         resolution = f"{input_config.width}x{input_config.height}"
         output_filename = f"results/cogvideox_{parallel_info}_{resolution}.mp4"
-        export_to_video(output, output_filename, fps=8)
+        export_to_video(output, output_filename, fps=16)
         print(f"output saved to {output_filename}")
 
     if get_world_group().rank == get_world_group().world_size - 1:

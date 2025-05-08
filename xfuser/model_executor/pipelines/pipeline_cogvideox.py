@@ -268,6 +268,13 @@ class xFuserCogVideoXPipeline(xFuserPipelineBaseWrapper):
             # for DPM-solver++
             old_pred_original_sample = None
             for i, t in enumerate(timesteps):
+                """
+                COMPACT SET TIME STEP
+                No async pipeline for CogVideoX
+                """
+                from xfuser.compact.main import compact_set_step
+                compact_set_step(i)
+                
                 if self.interrupt:
                     continue
 

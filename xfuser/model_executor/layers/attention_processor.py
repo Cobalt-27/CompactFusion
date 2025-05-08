@@ -1032,7 +1032,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                 )
         else:
             self.hybrid_seq_parallel_attn = None
-
+            
     def __call__(
         self,
         attn: Attention,
@@ -1091,13 +1091,13 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if (
             get_pipeline_parallel_world_size() == 1
-            and get_runtime_state().split_text_embed_in_sp
+            and get_runtime_state().split_text_embed_in_sp and False # Enforce Comopact
         ):
             hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
             hidden_states = hidden_states.transpose(1, 2).reshape(
                 batch_size, -1, attn.heads * head_dim
             )
-        elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1:
+        elif HAS_LONG_CTX_ATTN and get_sequence_parallel_world_size() > 1: 
             if get_runtime_state().split_text_embed_in_sp:
                 encoder_query = None
                 encoder_key = None
