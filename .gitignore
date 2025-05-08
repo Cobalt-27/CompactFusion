@@ -26,3 +26,4 @@ activations/
 *.ipynb
 !compact_plot/**/*.pt
 !compact_plot/**/*.ipynb
+!benchmark/fid/all_dimension.txt
