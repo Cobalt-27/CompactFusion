@@ -48,6 +48,7 @@ def customized_compact_config():
     return compact_config
 
 def main():
+    raise NotImplementedError("CogVideoX does not support FP16, while Compact only supports FP16.")
     parser = FlexibleArgumentParser(description="xFuser Arguments")
     args = xFuserArgs.add_cli_args(parser).parse_args()
     engine_args = xFuserArgs.from_cli_args(args)
