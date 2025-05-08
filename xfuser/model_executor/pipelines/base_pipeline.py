@@ -362,12 +362,14 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
     def _convert_transformer_backbone(
         self, transformer: nn.Module, enable_torch_compile: bool, enable_onediff: bool, cache_args: Optional[Dict] = None,
     ):
+        from diffusers.models.transformers.cogvideox_transformer_3d import CogVideoXTransformer3DModel
         if (
             get_pipeline_parallel_world_size() == 1
             and get_sequence_parallel_world_size() == 1
             and get_classifier_free_guidance_world_size() == 1
             and get_tensor_model_parallel_world_size() == 1
             and get_fast_attn_enable() == False
+            and not isinstance(transformer, CogVideoXTransformer3DModel)
         ):
             logger.info(
                 "Transformer backbone found, but model parallelism is not enabled, "

@@ -50,11 +50,13 @@ class xFuserCogVideoXTransformer3DWrapper(xFuserTransformerBaseWrapper):
         )
         """
         Replace the original CogVideoXAttnProcessor2_0 with xFuserCogVideoXAttnProcessor2_0
+        ONLY for sequence parallel
         """
-        for module in self.modules():
-            if isinstance(module, CogVideoXBlock):
-                if isinstance(module.attn1.processor, CogVideoXAttnProcessor2_0):
-                    module.attn1.processor = xFuserCogVideoXAttnProcessor2_0()
+        if get_sequence_parallel_world_size() > 1:
+            for module in self.modules():
+                if isinstance(module, CogVideoXBlock):
+                    if isinstance(module.attn1.processor, CogVideoXAttnProcessor2_0):
+                        module.attn1.processor = xFuserCogVideoXAttnProcessor2_0()
     
     @xFuserBaseWrapper.forward_check_condition
     def forward(

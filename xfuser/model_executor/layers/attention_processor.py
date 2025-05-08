@@ -1091,7 +1091,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
         #! ---------------------------------------- ATTENTION ----------------------------------------
         if (
             get_pipeline_parallel_world_size() == 1
-            and get_runtime_state().split_text_embed_in_sp and False # Enforce Comopact
+            and get_runtime_state().split_text_embed_in_sp and False # XXX: Enforce Comopact
         ):
             hidden_states = USP(query, key, value, dropout_p=0.0, is_causal=False)
             hidden_states = hidden_states.transpose(1, 2).reshape(
