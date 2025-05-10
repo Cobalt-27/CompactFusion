@@ -25,16 +25,16 @@ def customized_compact_config():
     prepared_patch_config = PatchConfig(
         use_compact=False,
         async_comm=True,
-        async_warmup=6,
+        async_warmup=2,
     )
     OVERRIDE_WITH_PATCH_PARA = False
     patch_config = prepared_patch_config if OVERRIDE_WITH_PATCH_PARA else None
-    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.LOW_RANK_Q
+    COMPACT_METHOD = COMPACT_COMPRESS_TYPE.INT2
     compact_config = CompactConfig(
         enabled=False,
         override_with_patch_gather_fwd=OVERRIDE_WITH_PATCH_PARA,
         patch_gather_fwd_config=patch_config,
-        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 6 else COMPACT_COMPRESS_TYPE.WARMUP,
+        compress_func=lambda layer_idx, step: (COMPACT_METHOD) if step >= 2 else COMPACT_COMPRESS_TYPE.WARMUP,
         sparse_ratio=8,
         comp_rank=32 if not COMPACT_METHOD in [COMPACT_COMPRESS_TYPE.BINARY, COMPACT_COMPRESS_TYPE.INT2] else -1,
         residual=1, # 0 for no residual, 1 for delta, 2 for delta-delta

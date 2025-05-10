@@ -21,7 +21,7 @@ from xfuser.compact.patchpara.df_utils import PatchConfig
 from xfuser.prof import Profiler, prof_summary
 import gc
 
-_NUM_FID_CANDIDATE = 100  # Reduced for testing, set to higher value for actual FID calculation
+_NUM_FID_CANDIDATE = 200  # Reduced for testing, set to higher value for actual FID calculation
 CFG = 6  # Default guidance scale for CogVideoX
 
 def flush():
@@ -75,8 +75,8 @@ def main():
     Compact
     """
     from examples.configs import get_config
-    # compact_config = get_config("CogVideoX", "binary")
-    compact_config = customized_compact_config()
+    compact_config = get_config("CogVideoX", "binary")
+    # compact_config = customized_compact_config()
     if compact_config.enabled:
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"
     compact_init(compact_config)

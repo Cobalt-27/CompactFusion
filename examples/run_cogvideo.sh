@@ -5,7 +5,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 # CogVideoX configuration
 SCRIPT="cogvideox_example.py"
-MODEL_ID="THUDM/CogVideoX-2b"
+MODEL_ID="/root/autodl-fs/CogVideoX-2b"
 INFERENCE_STEP=50
 
 mkdir -p ./results
@@ -14,9 +14,9 @@ mkdir -p ./results
 TASK_ARGS="--height 480 --width 720 --num_frames 49"
 
 # CogVideoX parallel configuration
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-N_GPUS=2
-PARALLEL_ARGS="--ulysses_degree 1 --ring_degree 2"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4
+N_GPUS=1
+PARALLEL_ARGS="--ulysses_degree 1 --ring_degree $N_GPUS"
 CFG_ARGS=""
 # CFG_ARGS="--use_cfg_parallel"
 
@@ -27,7 +27,8 @@ CFG_ARGS=""
 ENABLE_TILING="--enable_tiling --enable_slicing"
 COMPILE_FLAG="--use_torch_compile"
 
-prompt="A detailed wooden toy ship with intricately carved masts and sails is seen gliding smoothly over a plush, blue carpet that mimics the waves of the sea. The ship's hull is painted a rich brown, with tiny windows. The carpet, soft and textured, provides a perfect backdrop, resembling an oceanic expanse. Surrounding the ship are various other toys and children's items, hinting at a playful environment. The scene captures the innocence and imagination of childhood, with the toy ship's journey symbolizing endless adventures in a whimsical, indoor setting."
+# prompt="A detailed wooden toy ship with intricately carved masts and sails is seen gliding smoothly over a plush, blue carpet that mimics the waves of the sea. The ship's hull is painted a rich brown, with tiny windows. The carpet, soft and textured, provides a perfect backdrop, resembling an oceanic expanse. Surrounding the ship are various other toys and children's items, hinting at a playful environment. The scene captures the innocence and imagination of childhood, with the toy ship's journey symbolizing endless adventures in a whimsical, indoor setting."
+prompt="A street artist, clad in a worn-out denim jacket and a colorful bandana, stands before a vast concrete wall in the heart, holding a can of spray paint, spray-painting a colorful bird on a mottled wall."
 
 torchrun --nproc_per_node=$N_GPUS ./examples/$SCRIPT \
 --model $MODEL_ID \
