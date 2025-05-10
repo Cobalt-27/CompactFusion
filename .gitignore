@@ -28,3 +28,4 @@ activations/
 !compact_plot/**/*.ipynb
 !benchmark/fid/all_dimension.txt
 .ipynb_checkpoints/
+sample_videos*/
