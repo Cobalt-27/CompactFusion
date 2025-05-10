@@ -29,3 +29,7 @@ activations/
 !benchmark/fid/all_dimension.txt
 .ipynb_checkpoints/
 sample_videos*/
+common_metrics_on_video_quality/__pycache__/
+common_metrics_on_video_quality/.venv/
+common_metrics_on_video_quality/video/
+
