@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore")
 spatial = True         # Return a spatial map of perceptual distance.
 
 # Linearly calibrated models (LPIPS)
-loss_fn = lpips.LPIPS(net='alex', spatial=spatial) # Can also set net = 'squeeze' or 'vgg'
+loss_fn = lpips.LPIPS(net='alex', spatial=spatial, model_path='/root/.cache/torch/hub/checkpoints/alexnet-owt-7be5be79.pth') # Can also set net = 'squeeze' or 'vgg'
 # loss_fn = lpips.LPIPS(net='alex', spatial=spatial, lpips=False) # Can also set net = 'squeeze' or 'vgg'
 
 def trans(x):

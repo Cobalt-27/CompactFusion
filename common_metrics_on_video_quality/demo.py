@@ -6,19 +6,22 @@ from calculate_lpips import calculate_lpips
 
 # ps: pixel value should be in [0, 1]!
 
-NUMBER_OF_VIDEOS = 8
-VIDEO_LENGTH = 30
+NUMBER_OF_VIDEOS = 200
+VIDEO_LENGTH = 49
 CHANNEL = 3
-SIZE = 64
-videos1 = torch.zeros(NUMBER_OF_VIDEOS, VIDEO_LENGTH, CHANNEL, SIZE, SIZE, requires_grad=False)
-videos2 = torch.ones(NUMBER_OF_VIDEOS, VIDEO_LENGTH, CHANNEL, SIZE, SIZE, requires_grad=False)
+TARGET_SIZE_HW = (480, 720) 
+videos1 = torch.zeros(NUMBER_OF_VIDEOS, VIDEO_LENGTH, CHANNEL, TARGET_SIZE_HW[0], TARGET_SIZE_HW[1], requires_grad=False)
+videos2 = torch.ones(NUMBER_OF_VIDEOS, VIDEO_LENGTH, CHANNEL, TARGET_SIZE_HW[0], TARGET_SIZE_HW[1], requires_grad=False)
+actual_memory = videos1.element_size() * videos1.nelement()
+actual_memory_mb = actual_memory / (1024 * 1024)
+print(f"Actual tensor memory usage: {actual_memory_mb:.2f} MB")
+
 device = torch.device("cuda")
 # device = torch.device("cpu")
 
 import json
 result = {}
-only_final = False
-# only_final = True
+only_final = True
 result['fvd'] = calculate_fvd(videos1, videos2, device, method='styleganv', only_final=only_final)
 # result['fvd'] = calculate_fvd(videos1, videos2, device, method='videogpt', only_final=only_final)
 result['ssim'] = calculate_ssim(videos1, videos2, only_final=only_final)
