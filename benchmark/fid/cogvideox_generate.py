@@ -75,7 +75,7 @@ def main():
     Compact
     """
     from examples.configs import get_config
-    compact_config = get_config("CogVideoX", "binary")
+    compact_config = get_config("CogVideoX", "ring")
     # compact_config = customized_compact_config()
     if compact_config.enabled:
         assert args.pipefusion_parallel_degree == 1, "Compact should be disabled when using pipefusion"

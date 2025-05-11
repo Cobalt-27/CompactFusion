@@ -7,7 +7,7 @@ SCRIPT="cogvideox_generate.py"
 MODEL_ID="/root/autodl-fs/CogVideoX-2b"
 INFERENCE_STEP=50
 export CAPTION_FILE="vprompts.json"
-export SAMPLE_VIDEOS_FOLDER="sample_videos_binary_6gpu"
+export SAMPLE_VIDEOS_FOLDER="sample_videos_ring_6gpu"
 
 # CogVideoX specific task args
 TASK_ARGS="--height 480 --width 720 --num_frames 49"

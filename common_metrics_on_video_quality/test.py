@@ -6,19 +6,25 @@ from calculate_lpips import calculate_lpips
 
 import json
 import os
-import cv2 
+import cv2
+import argparse
 import numpy as np
 from tqdm import tqdm
 
 # --- 配置参数 ---
-original_video_dir = "/root/xDiT/sample_videos_old"
-generated_video_dir = "/root/xDiT/sample_videos_binary"
-output_filename = "evaluation_results_full_length.json"
+parser = argparse.ArgumentParser()
+parser.add_argument('--original_video_dir', type=str, default="/root/xDiT/sample_videos_ring", help='Directory containing original videos')
+parser.add_argument('--generated_video_dir', type=str, default="/root/xDiT/sample_videos_binary_6gpu", help='Directory containing generated videos')
+parser.add_argument('--output_filename', type=str, default="evaluation_results_full_length.json", help='Output JSON file name')
+args = parser.parse_args()
 
-##  如果设为0或负数，则评估所有找到的视频对
-NUMBER_OF_VIDEOS = 200
+original_video_dir = args.original_video_dir
+generated_video_dir = args.generated_video_dir
+output_filename = args.output_filename
+
+NUMBER_OF_VIDEOS = 100
 VIDEO_LENGTH = 49
-CHANNEL = 3                  
+CHANNEL = 3
 TARGET_SIZE_HW = (480, 720) 
 device = torch.device("cuda")
 
@@ -101,12 +107,12 @@ result = {}
 only_final = True 
 
 print("\nCalculating metrics...")
-print(f"Calculating FVD for {VIDEO_LENGTH} frames...")
-result['fvd'] = calculate_fvd(videos1_list, videos2_list, device, method='styleganv', only_final=only_final)
-print(f"Calculating SSIM for {VIDEO_LENGTH} frames...")
+# print(f"Calculating FVD for {VIDEO_LENGTH} frames...")
+# result['fvd'] = calculate_fvd(videos1_list, videos2_list, device, method='styleganv', only_final=only_final)
+# print(f"Calculating SSIM for {VIDEO_LENGTH} frames...")
 # result['ssim'] = calculate_ssim(videos1_list, videos2_list, only_final=only_final)
-print(f"Calculating PSNR for {VIDEO_LENGTH} frames...")
-result['psnr'] = calculate_psnr(videos1_list, videos2_list, only_final=only_final)
+# print(f"Calculating PSNR for {VIDEO_LENGTH} frames...")
+# result['psnr'] = calculate_psnr(videos1_list, videos2_list, only_final=only_final)
 print(f"Calculating LPIPS for {VIDEO_LENGTH} frames...")
 result['lpips'] = calculate_lpips(videos1_list, videos2_list, device, only_final=only_final)
 
@@ -114,6 +120,6 @@ print("\n--- Results ---")
 for key, value in result.items():
     print(f"{key}: {value}")
 
-with open(output_filename, "w") as f:
-    json.dump(result, f, indent=4)
-print(f"\nResults saved to {output_filename}")
+# with open(output_filename, "w") as f:
+#     json.dump(result, f, indent=4)
+# print(f"\nResults saved to {output_filename}")
