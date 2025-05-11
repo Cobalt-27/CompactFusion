@@ -42,8 +42,14 @@ def extract_keyframes(video_path, output_dir, num_keyframes=6):
     print("关键帧提取完成。")
 
 if __name__ == "__main__":
-    video_file = "your_video.mp4"  # 替换为你的视频文件路径
-    output_directory = "keyframes"  # 替换为你想要保存图片的目录
+    import argparse
+    parser = argparse.ArgumentParser(description='Extract keyframes from video')
+    parser.add_argument('--video', type=str, default="video/df.mp4", help='Path to input video file')
+    parser.add_argument('--output', type=str, default="keyframes", help='Directory to save extracted keyframes')
+    args = parser.parse_args()
+    
+    video_file = args.video
+    output_directory = args.output
     num_key_frames_to_extract = 6
 
     extract_keyframes(video_file, output_directory, num_key_frames_to_extract)

@@ -55,6 +55,10 @@ if __name__ == "__main__":
         "keyframes/keyframe_5.jpg",
         "keyframes/keyframe_6.jpg",
     ]  # 替换为你的实际图片路径列表
-    output_file = "vertical_stack.jpg"  # 替换为你想要保存的拼接后图片文件名
+    import argparse
+    parser = argparse.ArgumentParser(description='Concatenate images vertically')
+    parser.add_argument('--output', type=str, default="vertical_stack.jpg", help='Output file path for concatenated image')
+    args = parser.parse_args()
+    output_file = args.output
 
     concatenate_images_vertical(image_files, output_file)
