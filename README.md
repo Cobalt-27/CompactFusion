@@ -6,7 +6,6 @@
 
 ![Teaser Image](https://img.picgo.net/2025/05/15/teaser741bf3f5ec634b23.png)
 
----
 
 ## 🍀 Motivation
 
@@ -15,7 +14,6 @@
 - The transmitted data are **highly redundant**, wasting precious bandwidth on near-duplicate content.
 - We ask: **Why are we transmitting redundant stuff at all?**
 
----
 
 ## 🚀 Introducing CompactFusion
 
@@ -28,17 +26,15 @@ It compresses only the **change** (residual) between activations across steps �
 - ⚡ **Extremely efficient**: Up to **100× compression**, with **<1% data transmitted**, but still **outperforming DistriFusion in quality**.
 
 ![Intro Image](https://img.picgo.net/2025/05/15/intro40850a8451398a26.png)
----
 
 ## 🐚 Method Illustration
 
-**Residual Compression Principle**  
-![Residual Illustration](https://img.picgo.net/2025/05/15/residualae697c4a98859629.png)
-
-**System Architecture**  
-![System Diagram](https://img.picgo.net/2025/05/15/archce65b198fc390fc9.png)
-
----
+<table>
+<tr>
+<td><b>Residual Compression Principle</b><br><img src="https://img.picgo.net/2025/05/15/residualae697c4a98859629.png" alt="Residual Illustration"></td>
+<td><b>System Architecture</b><br><img src="https://img.picgo.net/2025/05/15/archce65b198fc390fc9.png" alt="System Diagram"></td>
+</tr>
+</table>
 
 ## ✨ Supported Features
 
@@ -50,7 +46,6 @@ CompactFusion supports out-of-the-box compression for:
 - ✅ Patch Parallel migrated to `xDiT`
 - ✅ FLUX, CogVideoX, SD, Pixart-alpha and other backbones
 
----
 
 ## 💾 Installation & Setup
 
