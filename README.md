@@ -69,4 +69,5 @@ Example usages are provided in:
 **We do not modify the setup of xDiT. You can refer directly to xDiT documentation for usage details.**
 
 ### ☘️ Acknowledgements
-We thank the xDiT team for providing a highly modular and comprehensive parallel framework.
+We thank the xDiT team for providing a highly modular and comprehensive parallel framework.  
+We also thank [common_metrics_on_video_quality](https://github.com/JunyaoHu/common_metrics_on_video_quality) for their excellent video quality evaluation tools.
