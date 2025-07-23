@@ -6,6 +6,14 @@
 
 ![Teaser Image](https://img.picgo.net/2025/05/15/teaser741bf3f5ec634b23.png)
 
+## ☘️ Acknowledgements
+We owe special thanks to the **xDiT** team—without their excellent open-source framework, this project would simply not exist.
+
+Their work laid the foundation for everything we've built.
+
+We thank the **DistriFusion** authors for sharing their code and system.
+
+We also thank [common_metrics_on_video_quality](https://github.com/JunyaoHu/common_metrics_on_video_quality) for their excellent video quality evaluation tools.
 
 ## 🍀 Motivation
 
@@ -51,15 +59,15 @@ CompactFusion supports out-of-the-box compression for:
 
 We build CompactFusion on top of the excellent [`xDiT`](https://github.com/xdit-project/xDiT) framework.
 
-### 🐳 Recommended Setup
+## 🐳 Recommended Setup
 
-You can use the pre-built Docker image from xDiT:
+You may simply use the pre-built Docker image from xDiT:
 
 ```bash
 docker pull thufeifeibear/xdit-dev
 ```
 
-### 🔧 Code Examples
+## 🔧 Code Examples
 Example usages are provided in:
 
 `examples/cogvideox_example.py`
@@ -67,7 +75,3 @@ Example usages are provided in:
 `examples/flux_example.py`
 
 **We do not modify the setup of xDiT. You can refer directly to xDiT documentation for usage details.**
-
-### ☘️ Acknowledgements
-We thank the xDiT team for providing a highly modular and comprehensive parallel framework.  
-We also thank [common_metrics_on_video_quality](https://github.com/JunyaoHu/common_metrics_on_video_quality) for their excellent video quality evaluation tools.
