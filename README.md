@@ -1,8 +1,8 @@
-# 🐳CompactFusion: Accelerating Parallel Diffusion Model Serving with Residual Compression
+# 🐳[NeurIPS 2025] Accelerating Parallel Diffusion Model Serving with Residual Compression
 
 > **TL;DR**: Diffusion models exhibit heavy temporal redundancy, yet we transmit full activations step after step.  
 > **Why are we sending near-duplicated data across GPUs?**  
-> CompactFusion compresses only the residuals — the real information change — to drastically reduce bandwidth with minimal quality loss.
+> **CompactFusion** transmits only the compressed residuals — the real information change — to drastically reduce bandwidth with minimal quality loss.
 
 ![Teaser Image](https://img.picgo.net/2025/05/15/teaser741bf3f5ec634b23.png)
 
