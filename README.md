@@ -75,3 +75,16 @@ Example usages are provided in:
 `examples/flux_example.py`
 
 **We do not modify the setup of xDiT. You can refer directly to xDiT documentation for usage details.**
+
+## 🎓 Citation
+
+If you use this code for your research, please cite our paper.
+
+```bibtex
+@article{luo2025accelerating,
+  title={Accelerating Parallel Diffusion Model Serving with Residual Compression},
+  author={Luo, Jiajun and Xiao, Yicheng and Xu, Jianru and You, Yangxiu and Lu, Rongwei and Tang, Chen and Jiang, Jingyan and Wang, Zhi},
+  journal={arXiv preprint arXiv:2507.17511},
+  year={2025}
+}
+```
